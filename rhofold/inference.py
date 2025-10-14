@@ -4,11 +4,11 @@ import sys
 
 import numpy as np
 import torch
-from rhofold.config import rhofold_config
-from rhofold.relax.relax import AmberRelaxation
-from rhofold.rhofold import RhoFold
-from rhofold.utils import get_device, save_ss2ct, timing
-from rhofold.utils.alphabet import get_features
+from ..rhofold.rhofold.config import rhofold_config
+from ..rhofold.rhofold.relax.relax import AmberRelaxation
+from ..rhofold.rhofold.rhofold import RhoFold
+from ..rhofold.rhofold.utils import get_device, save_ss2ct, timing
+from ..rhofold.rhofold.utils.alphabet import get_features
 
 
 @torch.no_grad()
@@ -19,7 +19,7 @@ def main(config):
 
     os.makedirs(config.output_dir, exist_ok=True)
 
-    logger = logging.getLogger('RhoFold Inference')
+    logger = logging.getLogger('RhoFold+ Inference')
     logger.setLevel(level=logging.DEBUG)
 
     formatter = logging.Formatter('%(asctime)s - %(levelname)s: %(message)s')
@@ -34,7 +34,7 @@ def main(config):
     logger.addHandler(file_handler)
     logger.addHandler(stream_handler)
 
-    logger.info(f'Constructing RhoFold')
+    logger.info(f'Constructing RhoFold+')
     model = RhoFold(rhofold_config)
 
     logger.info(f'    loading {config.ckpt}')
@@ -42,26 +42,26 @@ def main(config):
     model.eval()
 
     # Input seq, MSA
-    logger.info(f"Input_fas {config.input_fasta}")
+    logger.info(f"Input FASTA {config.fasta}")
 
-    if config.single_seq_pred:
-        config.input_msa = config.input_fasta
+    if config.use_single_seq:
+        config.msa = config.fasta
         logger.info(f'The model will use the single query sequence only. '
                     f'Setting the MSA path to the input fasta file.')
 
     else:
-        if config.input_msa is None:
+        if config.msa is None:
             raise ValueError('Single sequence mode is off. Please provide the input MSA file.')
         
-        logger.info(f'Input MSA path: {config.input_msa}')
+        logger.info(f'Input MSA path: {config.msa}')
 
-    with timing('RhoFold Inference', logger=logger):
+    with timing('RhoFold+ Inference', logger=logger):
 
         config.device = get_device(config.device)
         logger.info(f'    Inference using device {config.device}')
         model = model.to(config.device)
 
-        data_dict = get_features(config.input_fasta, config.input_msa)
+        data_dict = get_features(config.fasta, config.msa)
 
         # Forward pass
         outputs = model(tokens=data_dict['tokens'].to(config.device),
@@ -119,27 +119,27 @@ if __name__ == '__main__':
 
     parser = argparse.ArgumentParser()
 
-    parser.add_argument("--device",
-                        help="Default cpu. If GPUs are available, you can set --device cuda:<GPU_index> for faster prediction.",
-                        default='cpu')
     parser.add_argument("--ckpt",
                         help="Path to the pretrained model, default ./checkpoints/rhofold_pretrained_params.pt.",
                         default='./checkpoints/rhofold_pretrained_params.pt')
-    parser.add_argument("--input_fasta",
+    parser.add_argument("--device",
+                        help="Default cpu. If GPUs are available, you can set --device cuda:<GPU_index> for faster prediction.",
+                        default='cpu')
+    parser.add_argument("--fasta",
                         help="Path to the input fasta file. Valid nucleic acids in RNA sequence: A, U, G, C.",
                         required=True)
-    parser.add_argument("--input_msa",
+    parser.add_argument("--msa",
                         help="Path to the input msa file. Default None.",
                         default=None)
-    parser.add_argument("--output_dir",
+    parser.add_argument("--output-dir",
                         help="Path to the output dir.\n3D prediction is saved in .pdb format.\nDistogram prediction is saved in .npz format.\nSecondary structure prediction is save in .ct format.",
                         required=True)
-    parser.add_argument("--relax_steps",
+    parser.add_argument("--relax-steps",
                         help="Num of steps for structure refinement, default 1000.",
                         default=1000)
-    parser.add_argument("--single_seq_pred",
-                        help="Default False. If --single_seq_pred is set to True, the modeling will run using single sequence only (input_fasta).",
-                        default=False)
+    parser.add_argument("--use-single-seq",
+                        help="Default False. If --use_single_seq is set to True, the modeling will run using single sequence only (input_fasta).",
+                        action='store_true')
 
     args = parser.parse_args()
     main(args)
