@@ -1,0 +1,10 @@
+# for the checkpoint
+checkpoints/rhofold_pretrained_params.pt
+
+# for the results
+results/
+
+# for the __pycache__ directories
+rhofold/rhofold/__pycache__/*
+rhofold/rhofold/*/__pycache__/*
+rhofold/rhofold/model/rna_fm/__pycache__/*
