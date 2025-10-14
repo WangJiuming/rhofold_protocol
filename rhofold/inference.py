@@ -4,11 +4,11 @@ import sys
 
 import numpy as np
 import torch
-from ..rhofold.rhofold.config import rhofold_config
-from ..rhofold.rhofold.relax.relax import AmberRelaxation
-from ..rhofold.rhofold.rhofold import RhoFold
-from ..rhofold.rhofold.utils import get_device, save_ss2ct, timing
-from ..rhofold.rhofold.utils.alphabet import get_features
+from rhofold.config import rhofold_config
+from rhofold.relax.relax import AmberRelaxation
+from rhofold.rhofold import RhoFold
+from rhofold.utils import get_device, save_ss2ct, timing
+from rhofold.utils.alphabet import get_features
 
 
 @torch.no_grad()
