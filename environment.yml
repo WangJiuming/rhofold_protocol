@@ -96,6 +96,7 @@ dependencies:
   - munkres=1.0.7=py_1
   - mysql=8.4.0=h29a9f33_1
   - ncurses=6.4=h6a678d5_0
+  - neffy=0.1.1=py310h184ae93_1
   - nspr=4.36=h5888daf_0
   - nss=3.89.1=h6a678d5_0
   - numpy=2.2.3=py310hefbff90_0
