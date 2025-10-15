@@ -4,6 +4,7 @@ import sys
 
 import numpy as np
 import torch
+
 from rhofold.config import rhofold_config
 from rhofold.relax.relax import AmberRelaxation
 from rhofold.rhofold import RhoFold
@@ -34,84 +35,89 @@ def main(config):
     logger.addHandler(file_handler)
     logger.addHandler(stream_handler)
 
-    logger.info(f'Constructing RhoFold+')
-    model = RhoFold(rhofold_config)
+    try:
 
-    logger.info(f'    loading {config.ckpt}')
-    model.load_state_dict(torch.load(config.ckpt, map_location=torch.device('cpu'))['model'])
-    model.eval()
+        logger.info(f'Constructing RhoFold+')
+        model = RhoFold(rhofold_config)
 
-    # Input seq, MSA
-    logger.info(f"Input FASTA {config.fasta}")
+        logger.info(f'    loading {config.ckpt}')
+        model.load_state_dict(torch.load(config.ckpt, map_location=torch.device('cpu'))['model'])
+        model.eval()
 
-    if config.use_single_seq:
-        config.msa = config.fasta
-        logger.info(f'The model will use the single query sequence only. '
-                    f'Setting the MSA path to the input fasta file.')
+        # Input seq, MSA
+        logger.info(f"Input FASTA {config.fasta}")
 
-    else:
-        if config.msa is None:
-            raise ValueError('Single sequence mode is off. Please provide the input MSA file.')
-        
-        logger.info(f'Input MSA path: {config.msa}')
+        if config.use_single_seq:
+            config.msa = config.fasta
+            logger.info(f'The model will use the single query sequence only. '
+                        f'Setting the MSA path to the input fasta file.')
 
-    with timing('RhoFold+ Inference', logger=logger):
+        else:
+            if config.msa is None:
+                raise ValueError('Single sequence mode is off. Please provide the input MSA file.')
 
-        config.device = get_device(config.device)
-        logger.info(f'    Inference using device {config.device}')
-        model = model.to(config.device)
+            logger.info(f'Input MSA path: {config.msa}')
 
-        data_dict = get_features(config.fasta, config.msa)
+        with timing('RhoFold+ Inference', logger=logger):
 
-        # Forward pass
-        outputs = model(tokens=data_dict['tokens'].to(config.device),
-                        rna_fm_tokens=data_dict['rna_fm_tokens'].to(config.device),
-                        seq=data_dict['seq'],
-                        )
+            config.device = get_device(config.device)
+            logger.info(f'    Inference using device {config.device}')
+            model = model.to(config.device)
 
-        output = outputs[-1]
+            data_dict = get_features(config.fasta, config.msa)
 
-        os.makedirs(config.output_dir, exist_ok=True)
-
-        # Secondary structure, .ct format
-        ss_prob_map = torch.sigmoid(output['ss'][0, 0]).data.cpu().numpy()
-        ss_file = f'{config.output_dir}/ss.ct'
-        save_ss2ct(ss_prob_map, data_dict['seq'], ss_file, threshold=0.5)
-
-        # Dist prob map & Secondary structure prob map, .npz format
-        npz_file = f'{config.output_dir}/results.npz'
-        np.savez_compressed(npz_file,
-                            dist_n=torch.softmax(output['n'].squeeze(0), dim=0).data.cpu().numpy(),
-                            dist_p=torch.softmax(output['p'].squeeze(0), dim=0).data.cpu().numpy(),
-                            dist_c=torch.softmax(output['c4_'].squeeze(0), dim=0).data.cpu().numpy(),
-                            ss_prob_map=ss_prob_map,
-                            plddt=output['plddt'][0].data.cpu().numpy(),
+            # Forward pass
+            outputs = model(tokens=data_dict['tokens'].to(config.device),
+                            rna_fm_tokens=data_dict['rna_fm_tokens'].to(config.device),
+                            seq=data_dict['seq'],
                             )
 
-        # Save the prediction
-        unrelaxed_model = f'{config.output_dir}/unrelaxed_model.pdb'
+            output = outputs[-1]
 
-        # The last cords prediction
-        node_cords_pred = output['cord_tns_pred'][-1].squeeze(0)
-        model.structure_module.converter.export_pdb_file(data_dict['seq'],
-                                                         node_cords_pred.data.cpu().numpy(),
-                                                         path=unrelaxed_model, chain_id=None,
-                                                         confidence=output['plddt'][0].data.cpu().numpy(),
-                                                         logger=logger)
+            os.makedirs(config.output_dir, exist_ok=True)
 
-    # Amber relaxation
-    if config.device == 'cpu':
-        use_gpu = False
-    else:
-        use_gpu = True
+            # Secondary structure, .ct format
+            ss_prob_map = torch.sigmoid(output['ss'][0, 0]).data.cpu().numpy()
+            ss_file = f'{config.output_dir}/ss.ct'
+            save_ss2ct(ss_prob_map, data_dict['seq'], ss_file, threshold=0.5)
 
-    if config.relax_steps is not None:
-        relax_steps = int(config.relax_steps)
-        if relax_steps > 0:
-            with timing(f'Amber Relaxation : {relax_steps} iterations', logger=logger):
-                amber_relax = AmberRelaxation(max_iterations=relax_steps, logger=logger, use_gpu=use_gpu)
-                relaxed_model = f'{config.output_dir}/relaxed_{relax_steps}_model.pdb'
-                amber_relax.process(unrelaxed_model, relaxed_model)
+            # Dist prob map & Secondary structure prob map, .npz format
+            npz_file = f'{config.output_dir}/results.npz'
+            np.savez_compressed(npz_file,
+                                dist_n=torch.softmax(output['n'].squeeze(0), dim=0).data.cpu().numpy(),
+                                dist_p=torch.softmax(output['p'].squeeze(0), dim=0).data.cpu().numpy(),
+                                dist_c=torch.softmax(output['c4_'].squeeze(0), dim=0).data.cpu().numpy(),
+                                ss_prob_map=ss_prob_map,
+                                plddt=output['plddt'][0].data.cpu().numpy(),
+                                )
+
+            # Save the prediction
+            unrelaxed_model = f'{config.output_dir}/unrelaxed_model.pdb'
+
+            # The last cords prediction
+            node_cords_pred = output['cord_tns_pred'][-1].squeeze(0)
+            model.structure_module.converter.export_pdb_file(data_dict['seq'],
+                                                             node_cords_pred.data.cpu().numpy(),
+                                                             path=unrelaxed_model, chain_id=None,
+                                                             confidence=output['plddt'][0].data.cpu().numpy(),
+                                                             logger=logger)
+
+        # Amber relaxation
+        if config.device == 'cpu':
+            use_gpu = False
+        else:
+            use_gpu = True
+
+        if config.relax_steps is not None:
+            relax_steps = int(config.relax_steps)
+            if relax_steps > 0:
+                with timing(f'Amber Relaxation : {relax_steps} iterations', logger=logger):
+                    amber_relax = AmberRelaxation(max_iterations=relax_steps, logger=logger, use_gpu=use_gpu)
+                    relaxed_model = f'{config.output_dir}/relaxed_{relax_steps}_model.pdb'
+                    amber_relax.process(unrelaxed_model, relaxed_model)
+
+    except Exception as e:
+        logger.error(f'Failed to run RhoFold+ inference successfully. Error: {e}', exc_info=True)
 
 
 if __name__ == '__main__':
