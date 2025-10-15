@@ -8,7 +8,7 @@ if __name__ == '__main__':
     
     parser = argparse.ArgumentParser(description='Parse pLDDT scores from npz file')
     parser.add_argument('--npz', type=str, help='Path to npz file')
-    parser.add_argument('--save-plddt', type=str, help='Path to save pLDDT scores', default=None)
+    parser.add_argument('--save-plddt', type=str, help='Path to save pLDDT scores, None by default for not saving', default=None)
 
     args = parser.parse_args()
 
@@ -19,7 +19,7 @@ if __name__ == '__main__':
     plddt_scores = distogram_data['plddt']  # shape = (1, L)
 
     mean_plddt = np.mean(plddt_scores)
-    print(f'mean pLDDT = {mean_plddt}')
+    print(f'mean pLDDT = {mean_plddt:.4f}')
     
     # Save the extracted pLDDT scores if the path is specified
     if save_plddt_path is not None:
