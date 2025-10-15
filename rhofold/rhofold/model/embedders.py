@@ -10,17 +10,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import torch
-import torch.nn as nn
 from typing import Tuple
 
-from rhofold.model.primitives import Linear, LayerNorm
-from rhofold.utils.tensor_utils import add
+import torch
+import torch.nn as nn
+
 import rhofold.model.rna_fm as rna_esm
 from rhofold.model.msa import MSANet
 from rhofold.model.pair import PairNet
+from rhofold.model.primitives import Linear, LayerNorm
 from rhofold.utils import exists
 from rhofold.utils.alphabet import RNAAlphabet
+from rhofold.utils.tensor_utils import add
+
 
 class RecyclingEmbedder(nn.Module):
     """
@@ -28,14 +30,15 @@ class RecyclingEmbedder(nn.Module):
 
     Implements Algorithm 32.
     """
+
     def __init__(
-        self,
-        c_m: int,
-        c_z: int,
-        min_bin: float,
-        max_bin: float,
-        no_bins: int,
-        **kwargs,
+            self,
+            c_m: int,
+            c_z: int,
+            min_bin: float,
+            max_bin: float,
+            no_bins: int,
+            **kwargs,
     ):
         """
         Args:
@@ -64,11 +67,11 @@ class RecyclingEmbedder(nn.Module):
         self.layer_norm_z = LayerNorm(self.c_z)
 
     def forward(
-        self,
-        m: torch.Tensor,
-        z: torch.Tensor,
-        x: torch.Tensor,
-        inplace_safe: bool = False,
+            self,
+            m: torch.Tensor,
+            z: torch.Tensor,
+            x: torch.Tensor,
+            inplace_safe: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Args:
@@ -86,13 +89,13 @@ class RecyclingEmbedder(nn.Module):
         """
         # [*, N, C_m]
         m_update = self.layer_norm_m(m)
-        if(inplace_safe):
+        if (inplace_safe):
             m.copy_(m_update)
             m_update = m
 
         # [*, N, N, C_z]
         z_update = self.layer_norm_z(z)
-        if(inplace_safe):
+        if (inplace_safe):
             z.copy_(z_update)
             z_update = z
 
@@ -122,7 +125,7 @@ class RecyclingEmbedder(nn.Module):
 
         return m_update, z_update
 
-import os
+
 class MSAEmbedder(nn.Module):
     """MSAEmbedder """
 
@@ -138,15 +141,15 @@ class MSAEmbedder(nn.Module):
 
         self.alphabet = RNAAlphabet.from_architecture('RNA')
 
-        self.msa_emb = MSANet(d_model = c_m,
-                               d_msa = len(self.alphabet),
-                               padding_idx = self.alphabet.padding_idx,
-                               is_pos_emb = True,
-                               )
+        self.msa_emb = MSANet(d_model=c_m,
+                              d_msa=len(self.alphabet),
+                              padding_idx=self.alphabet.padding_idx,
+                              is_pos_emb=True,
+                              )
 
-        self.pair_emb = PairNet(d_model = c_z,
-                                 d_msa = len(self.alphabet),
-                                 )
+        self.pair_emb = PairNet(d_model=c_z,
+                                d_msa=len(self.alphabet),
+                                )
 
         self.rna_fm, self.rna_fm_reduction = None, None
 
@@ -163,20 +166,21 @@ class MSAEmbedder(nn.Module):
             # if not os.path.exists(rna_fm_ckpt):
             #     torch.save({'model': self.rna_fm.state_dict()}, rna_fm_ckpt)
 
-    def forward(self, tokens, rna_fm_tokens = None, is_BKL = True, **unused):
+    def forward(self, tokens, rna_fm_tokens=None, is_BKL=True, **unused):
 
         assert tokens.ndim == 3
         if not is_BKL:
             tokens = tokens.permute(0, 2, 1)
 
-        B, K, L = tokens.size()# batch_size, num_alignments, seq_len
+        B, K, L = tokens.size()  # batch_size, num_alignments, seq_len
         msa_fea = self.msa_emb(tokens)
 
         if exists(self.rna_fm):
             results = self.rna_fm(rna_fm_tokens, need_head_weights=False, repr_layers=[12], return_contacts=False)
             token_representations = results["representations"][12].unsqueeze(1).expand(-1, K, -1, -1)
-            msa_fea = self.rna_fm_reduction(torch.cat([token_representations, msa_fea], dim = -1))
 
-        pair_fea = self.pair_emb(tokens, t1ds = None, t2ds = None)
+            msa_fea = self.rna_fm_reduction(torch.cat([token_representations, msa_fea], dim=-1))
+
+        pair_fea = self.pair_emb(tokens, t1ds=None, t2ds=None)
 
         return msa_fea, pair_fea
