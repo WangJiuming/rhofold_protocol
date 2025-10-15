@@ -13,7 +13,6 @@ import torch
 from Bio import BiopythonWarning
 from Bio.PDB import PDBParser
 from Bio.PDB.PDBExceptions import PDBConstructionException
-# from .utils import get_rand_str
 from .rna_utils import parse_fas_file
 from .rna_constants import get_frame_definition
 
