@@ -1,7 +1,14 @@
 # for the checkpoint
 checkpoints/rhofold_pretrained_params.pt
 
-# for the results
+# for the newly added data
+data/
+
+# but still track the example data
+!data/rhofold/3owz_A/
+!data/rnafm/rf02684/
+
+# for the newly produced results
 results/
 
 # for the __pycache__ directories
