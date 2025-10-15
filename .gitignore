@@ -15,3 +15,5 @@ results/
 rhofold/rhofold/__pycache__/*
 rhofold/rhofold/*/__pycache__/*
 rhofold/rhofold/model/rna_fm/__pycache__/*
+**/__pycache__/
+
