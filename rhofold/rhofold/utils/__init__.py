@@ -23,6 +23,8 @@ def get_device(device) -> str:
     if device is None:
         if torch.cuda.is_available():
             return "cuda"
+        elif torch.backends.mps.is_available():
+            return "mps"
         else:
             return 'cpu'
     elif device == 'cpu':
@@ -32,8 +34,13 @@ def get_device(device) -> str:
             return device
         else:
             raise ValueError(f"Cuda is not available")
+    elif device == 'mps':
+        if torch.backends.mps.is_available():
+            return device
+        else:
+            raise ValueError(f"MPS is not available")
     else:
-        raise ValueError(f"Device{device} is not available")
+        raise ValueError(f"Device {device} is not available")
 
 @contextlib.contextmanager
 def tmpdir(base_dir: Optional[str] = None):

@@ -32,8 +32,10 @@ def main(config):
     stream_handler.setLevel(logging.DEBUG)
     stream_handler.setFormatter(formatter)
 
-    logger.addHandler(file_handler)
-    logger.addHandler(stream_handler)
+    # Avoid adding handlers multiple times if the script is run in an interactive session
+    if not logger.handlers:
+        logger.addHandler(file_handler)
+        logger.addHandler(stream_handler)
 
     try:
 
@@ -74,8 +76,6 @@ def main(config):
 
             output = outputs[-1]
 
-            os.makedirs(config.output_dir, exist_ok=True)
-
             # Secondary structure, .ct format
             ss_prob_map = torch.sigmoid(output['ss'][0, 0]).data.cpu().numpy()
             ss_file = f'{config.output_dir}/ss.ct'
@@ -103,14 +103,10 @@ def main(config):
                                                              logger=logger)
 
         # Amber relaxation
-        if config.device == 'cpu':
-            use_gpu = False
-        else:
-            use_gpu = True
-
         if config.relax_steps is not None:
             relax_steps = int(config.relax_steps)
             if relax_steps > 0:
+                use_gpu = config.device.startswith('cuda')
                 with timing(f'Amber Relaxation : {relax_steps} iterations', logger=logger):
                     amber_relax = AmberRelaxation(max_iterations=relax_steps, logger=logger, use_gpu=use_gpu)
                     relaxed_model = f'{config.output_dir}/relaxed_{relax_steps}_model.pdb'
@@ -129,7 +125,7 @@ if __name__ == '__main__':
                         help="Path to the pretrained model, default ./checkpoints/rhofold_pretrained_params.pt.",
                         default='./checkpoints/rhofold_pretrained_params.pt')
     parser.add_argument("--device",
-                        help="Default cpu. If GPUs are available, you can set --device cuda:<GPU_index> for faster prediction.",
+                        help="Default cpu. If GPUs are available, you can set --device cuda:<GPU_index> for faster prediction. On Apple Silicon, you can use --device mps.",
                         default='cpu')
     parser.add_argument("--fasta",
                         help="Path to the input fasta file. Valid nucleic acids in RNA sequence: A, U, G, C.",
