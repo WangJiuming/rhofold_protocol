@@ -184,40 +184,19 @@ class MultiheadAttention(nn.Module):
         assert embed_dim == self.embed_dim
         assert list(query.size()) == [tgt_len, bsz, embed_dim]
 
-        if (
-            self.enable_torch_version
+        # Use native PyTorch SDPA when possible (faster and more memory efficient)
+        use_sdpa = (
+            hasattr(F, "scaled_dot_product_attention")
             and not self.onnx_trace
             and incremental_state is None
             and not static_kv
-            # A workaround for quantization to work. Otherwise JIT compilation
-            # treats bias in linear module as method.
             and not torch.jit.is_scripting()
-            and not need_head_weights
-        ):
-            assert key is not None and value is not None
-            return F.multi_head_attention_forward(
-                query,
-                key,
-                value,
-                self.embed_dim,
-                self.num_heads,
-                torch.empty([0]),
-                torch.cat((self.q_proj.bias, self.k_proj.bias, self.v_proj.bias)),
-                self.bias_k,
-                self.bias_v,
-                self.add_zero_attn,
-                self.dropout,
-                self.out_proj.weight,
-                self.out_proj.bias,
-                self.training,
-                key_padding_mask,
-                need_weights,
-                attn_mask,
-                use_separate_proj_weight=True,
-                q_proj_weight=self.q_proj.weight,
-                k_proj_weight=self.k_proj.weight,
-                v_proj_weight=self.v_proj.weight,
-            )
+            and not need_weights
+            and not before_softmax
+            and self.bias_k is None
+            and self.bias_v is None
+            and not self.add_zero_attn
+        )
 
         if incremental_state is not None:
             saved_state = self._get_input_buffer(incremental_state)
@@ -249,6 +228,43 @@ class MultiheadAttention(nn.Module):
             q = self.q_proj(query)
             k = self.k_proj(key)
             v = self.v_proj(value)
+        
+        # Fast path using native PyTorch SDPA
+        if use_sdpa:
+            assert k is not None and v is not None
+            # Reshape for SDPA: (T, B, E) -> (B, num_heads, T, head_dim)
+            q = q.contiguous().view(tgt_len, bsz, self.num_heads, self.head_dim).permute(1, 2, 0, 3)
+            k = k.contiguous().view(-1, bsz, self.num_heads, self.head_dim).permute(1, 2, 0, 3)
+            v = v.contiguous().view(-1, bsz, self.num_heads, self.head_dim).permute(1, 2, 0, 3)
+            
+            # Prepare attention mask for SDPA
+            sdpa_attn_mask = None
+            if attn_mask is not None or key_padding_mask is not None:
+                src_len = k.size(2)
+                sdpa_attn_mask = torch.zeros(bsz, self.num_heads, tgt_len, src_len, 
+                                              dtype=q.dtype, device=q.device)
+                if attn_mask is not None:
+                    sdpa_attn_mask = sdpa_attn_mask + attn_mask.unsqueeze(0).unsqueeze(0)
+                if key_padding_mask is not None:
+                    sdpa_attn_mask = sdpa_attn_mask.masked_fill(
+                        key_padding_mask.unsqueeze(1).unsqueeze(2).to(torch.bool),
+                        float("-inf")
+                    )
+            
+            # Use native SDPA
+            attn = F.scaled_dot_product_attention(
+                q, k, v,
+                attn_mask=sdpa_attn_mask,
+                dropout_p=self.dropout if self.training else 0.0,
+            )
+            
+            # Reshape back: (B, num_heads, T, head_dim) -> (T, B, E)
+            attn = attn.permute(2, 0, 1, 3).contiguous().view(tgt_len, bsz, embed_dim)
+            attn = self.out_proj(attn)
+            
+            return attn, None
+        
+        # Legacy path for backward compatibility
         q *= self.scaling
 
         if self.bias_k is not None:

@@ -95,7 +95,7 @@ class RowSelfAttention(nn.Module):
 
         if self_attn_padding_mask is not None:
             attn_weights = attn_weights.masked_fill(
-                self_attn_padding_mask[:, 0].unsqueeze(0).unsqueeze(2),
+                self_attn_padding_mask[:, 0].unsqueeze(0).unsqueeze(2).to(torch.bool),
                 -10000,
             )
 
@@ -123,14 +123,64 @@ class RowSelfAttention(nn.Module):
         if (num_rows * num_cols > self.max_tokens_per_msa) and not torch.is_grad_enabled():
             return self._batched_forward(x, self_attn_mask, self_attn_padding_mask)
         else:
-            scaling = self.align_scaling(x)
-            attn_weights = self.compute_attention_weights(
-                x, scaling, self_attn_mask, self_attn_padding_mask
+            # Use native SDPA when possible
+            use_sdpa = (
+                hasattr(torch.nn.functional, "scaled_dot_product_attention")
+                and self_attn_mask is None
+                and torch.is_grad_enabled()
             )
-            attn_probs = attn_weights.softmax(-1)
-            attn_probs = self.dropout_module(attn_probs)
-            output = self.compute_attention_update(x, attn_probs)
-            return output, attn_probs
+            
+            if use_sdpa:
+                # Reshape for SDPA: [R, C, B, E] -> [B, H, R*C, head_dim] for each row's attention
+                q = self.q_proj(x).view(num_rows, num_cols, batch_size, self.num_heads, self.head_dim)
+                k = self.k_proj(x).view(num_rows, num_cols, batch_size, self.num_heads, self.head_dim)
+                v = self.v_proj(x).view(num_rows, num_cols, batch_size, self.num_heads, self.head_dim)
+                
+                scaling = self.align_scaling(x)
+                
+                if self_attn_padding_mask is not None:
+                    # Zero out padded positions
+                    q = q * (1 - self_attn_padding_mask.permute(1, 2, 0).unsqueeze(3).unsqueeze(4).to(q))
+                
+                # Rearrange to [B*C, H, R, head_dim] for row-wise attention
+                q = q.permute(2, 1, 3, 0, 4).contiguous().view(batch_size * num_cols, self.num_heads, num_rows, self.head_dim)
+                k = k.permute(2, 1, 3, 0, 4).contiguous().view(batch_size * num_cols, self.num_heads, num_rows, self.head_dim)
+                v = v.permute(2, 1, 3, 0, 4).contiguous().view(batch_size * num_cols, self.num_heads, num_rows, self.head_dim)
+                
+                # Apply scaling
+                q = q * scaling
+                
+                # Prepare attention mask
+                attn_mask = None
+                if self_attn_padding_mask is not None:
+                    # [B, R, C] -> [B*C, 1, 1, R]
+                    attn_mask = self_attn_padding_mask[:, :, 0].unsqueeze(1).unsqueeze(2)
+                    attn_mask = attn_mask.expand(batch_size, num_cols, 1, num_rows).contiguous()
+                    attn_mask = attn_mask.view(batch_size * num_cols, 1, 1, num_rows).expand(-1, self.num_heads, num_rows, -1)
+                    attn_mask = torch.where(attn_mask.bool(), float('-inf'), 0.0)
+                
+                # Use SDPA
+                context = torch.nn.functional.scaled_dot_product_attention(
+                    q, k, v,
+                    attn_mask=attn_mask,
+                    dropout_p=self.dropout if self.training else 0.0,
+                )
+                
+                # Reshape back: [B*C, H, R, head_dim] -> [R, C, B, E]
+                context = context.view(batch_size, num_cols, self.num_heads, num_rows, self.head_dim)
+                context = context.permute(3, 1, 0, 2, 4).contiguous().view(num_rows, num_cols, batch_size, embed_dim)
+                output = self.out_proj(context)
+                
+                return output, None
+            else:
+                scaling = self.align_scaling(x)
+                attn_weights = self.compute_attention_weights(
+                    x, scaling, self_attn_mask, self_attn_padding_mask
+                )
+                attn_probs = attn_weights.softmax(-1)
+                attn_probs = self.dropout_module(attn_probs)
+                output = self.compute_attention_update(x, attn_probs)
+                return output, attn_probs
 
 
 class ColumnSelfAttention(nn.Module):
@@ -202,26 +252,64 @@ class ColumnSelfAttention(nn.Module):
             )
             output = self.out_proj(self.v_proj(x))
         else:
-            q = self.q_proj(x).view(num_rows, num_cols, batch_size, self.num_heads, self.head_dim)
-            k = self.k_proj(x).view(num_rows, num_cols, batch_size, self.num_heads, self.head_dim)
-            v = self.v_proj(x).view(num_rows, num_cols, batch_size, self.num_heads, self.head_dim)
-            q *= self.scaling
-
-            attn_weights = torch.einsum("icnhd,jcnhd->hcnij", q, k)
-
-            if self_attn_mask is not None:
-                raise NotImplementedError
-            if self_attn_padding_mask is not None:
-                attn_weights = attn_weights.masked_fill(
-                    self_attn_padding_mask.permute(2, 0, 1).unsqueeze(0).unsqueeze(3),
-                    -10000,
+            # Use native SDPA when possible
+            use_sdpa = (
+                hasattr(torch.nn.functional, "scaled_dot_product_attention")
+                and self_attn_mask is None
+                and torch.is_grad_enabled()
+            )
+            
+            if use_sdpa:
+                q = self.q_proj(x).view(num_rows, num_cols, batch_size, self.num_heads, self.head_dim)
+                k = self.k_proj(x).view(num_rows, num_cols, batch_size, self.num_heads, self.head_dim)
+                v = self.v_proj(x).view(num_rows, num_cols, batch_size, self.num_heads, self.head_dim)
+                
+                # Rearrange to [B*C, H, R, head_dim] for column-wise attention
+                q = q.permute(2, 1, 3, 0, 4).contiguous().view(batch_size * num_cols, self.num_heads, num_rows, self.head_dim)
+                k = k.permute(2, 1, 3, 0, 4).contiguous().view(batch_size * num_cols, self.num_heads, num_rows, self.head_dim)
+                v = v.permute(2, 1, 3, 0, 4).contiguous().view(batch_size * num_cols, self.num_heads, num_rows, self.head_dim)
+                
+                # Prepare attention mask
+                attn_mask = None
+                if self_attn_padding_mask is not None:
+                    # [B, R, C] -> [B*C, 1, R, 1] broadcast to [B*C, H, R, R]
+                    attn_mask = self_attn_padding_mask.permute(2, 0, 1).unsqueeze(1).unsqueeze(3)
+                    attn_mask = attn_mask.view(batch_size * num_cols, 1, num_rows, 1).expand(-1, self.num_heads, -1, num_rows)
+                    attn_mask = torch.where(attn_mask.bool(), float('-inf'), 0.0)
+                
+                # Use SDPA
+                context = torch.nn.functional.scaled_dot_product_attention(
+                    q, k, v,
+                    attn_mask=attn_mask,
+                    dropout_p=self.dropout if self.training else 0.0,
                 )
+                
+                # Reshape back: [B*C, H, R, head_dim] -> [R, C, B, E]
+                context = context.view(batch_size, num_cols, self.num_heads, num_rows, self.head_dim)
+                context = context.permute(3, 1, 0, 2, 4).contiguous().view(num_rows, num_cols, batch_size, embed_dim)
+                output = self.out_proj(context)
+                attn_probs = None
+            else:
+                q = self.q_proj(x).view(num_rows, num_cols, batch_size, self.num_heads, self.head_dim)
+                k = self.k_proj(x).view(num_rows, num_cols, batch_size, self.num_heads, self.head_dim)
+                v = self.v_proj(x).view(num_rows, num_cols, batch_size, self.num_heads, self.head_dim)
+                q *= self.scaling
 
-            attn_probs = attn_weights.softmax(-1)
-            attn_probs = self.dropout_module(attn_probs)
-            context = torch.einsum("hcnij,jcnhd->icnhd", attn_probs, v)
-            context = context.contiguous().view(num_rows, num_cols, batch_size, embed_dim)
-            output = self.out_proj(context)
+                attn_weights = torch.einsum("icnhd,jcnhd->hcnij", q, k)
+
+                if self_attn_mask is not None:
+                    raise NotImplementedError
+                if self_attn_padding_mask is not None:
+                    attn_weights = attn_weights.masked_fill(
+                        self_attn_padding_mask.permute(2, 0, 1).unsqueeze(0).unsqueeze(3).to(torch.bool),
+                        -10000,
+                    )
+
+                attn_probs = attn_weights.softmax(-1)
+                attn_probs = self.dropout_module(attn_probs)
+                context = torch.einsum("hcnij,jcnhd->icnhd", attn_probs, v)
+                context = context.contiguous().view(num_rows, num_cols, batch_size, embed_dim)
+                output = self.out_proj(context)
         return output, attn_probs
 
     def forward(
