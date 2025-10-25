@@ -115,29 +115,29 @@ def main(config):
 
             with timing('Save Outputs (.ct + .npz + .pdb)', logger=logger):
                 # Secondary structure, .ct format
-                ss_prob_map = torch.sigmoid(output['ss'][0, 0]).data.cpu().numpy()
+                ss_prob_map = torch.sigmoid(output['ss'][0, 0].float()).detach().cpu().numpy()
                 ss_file = f'{config.output_dir}/ss.ct'
                 save_ss2ct(ss_prob_map, data_dict['seq'], ss_file, threshold=0.5)
 
                 # Dist prob map & Secondary structure prob map, .npz format
                 npz_file = f'{config.output_dir}/results.npz'
                 np.savez_compressed(npz_file,
-                                    dist_n=torch.softmax(output['n'].squeeze(0), dim=0).data.cpu().numpy(),
-                                    dist_p=torch.softmax(output['p'].squeeze(0), dim=0).data.cpu().numpy(),
-                                    dist_c=torch.softmax(output['c4_'].squeeze(0), dim=0).data.cpu().numpy(),
+                                    dist_n=torch.softmax(output['n'].squeeze(0).float(), dim=0).detach().cpu().numpy(),
+                                    dist_p=torch.softmax(output['p'].squeeze(0).float(), dim=0).detach().cpu().numpy(),
+                                    dist_c=torch.softmax(output['c4_'].squeeze(0).float(), dim=0).detach().cpu().numpy(),
                                     ss_prob_map=ss_prob_map,
-                                    plddt=output['plddt'][0].data.cpu().numpy(),
+                                    plddt=output['plddt'][0].float().detach().cpu().numpy(),
                                     )
 
                 # Save the prediction
                 unrelaxed_model = f'{config.output_dir}/unrelaxed_model.pdb'
 
                 # The last cords prediction
-                node_cords_pred = output['cord_tns_pred'][-1].squeeze(0)
+                node_cords_pred = output['cord_tns_pred'][-1].squeeze(0).float()
                 model.structure_module.converter.export_pdb_file(data_dict['seq'],
                                                                  node_cords_pred.data.cpu().numpy(),
                                                                  path=unrelaxed_model, chain_id=None,
-                                                                 confidence=output['plddt'][0].data.cpu().numpy(),
+                                                                 confidence=output['plddt'][0].float().detach().cpu().numpy(),
                                                                  logger=logger)
 
         # Amber relaxation
