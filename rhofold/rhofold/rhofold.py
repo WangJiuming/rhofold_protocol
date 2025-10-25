@@ -12,6 +12,8 @@
 
 import torch
 import torch.nn as nn
+import time
+import logging
 
 from rhofold.model.embedders import MSAEmbedder, RecyclingEmbedder
 from rhofold.model.e2eformer import E2EformerStack
@@ -69,7 +71,7 @@ class RhoFold(nn.Module):
 
         return output
 
-    def forward_one_cycle(self, tokens, rna_fm_tokens, recycling_inputs, seq):
+    def forward_one_cycle(self, tokens, rna_fm_tokens, recycling_inputs, seq, *, profile: bool = False, logger: logging.Logger = None):
         '''
         Args:
             tokens: [bs, seq_len, c_z]
@@ -80,17 +82,40 @@ class RhoFold(nn.Module):
 
         msa_tokens_pert = tokens[:, :self.config.globals.msa_depth]
 
+        # Optional detailed timing per recycle
+        timings = {}
+        def _sync():
+            # Ensure accurate timings on async backends; ignore if not available
+            try:
+                if tokens.is_cuda:
+                    torch.cuda.synchronize()
+                # torch.mps.synchronize is available on recent PyTorch; guard it
+                if hasattr(torch, 'mps') and hasattr(torch.mps, 'synchronize'):
+                    torch.mps.synchronize()
+            except Exception:
+                pass
+
+        if profile:
+            _sync(); t0 = time.time()
         msa_fea, pair_fea = self.msa_embedder.forward(tokens=msa_tokens_pert,
                                                       rna_fm_tokens=rna_fm_tokens,
                                                       is_BKL=True)
+        if profile:
+            _sync(); timings['embed_msa'] = time.time() - t0
 
         if exists(self.recycle_embnet) and exists(recycling_inputs):
+            if profile:
+                _sync(); t1 = time.time()
             msa_fea_up, pair_fea_up = self.recycle_embnet(recycling_inputs['single_fea'],
                                                           recycling_inputs['pair_fea'],
                                                           recycling_inputs["cords_c1'"])
             msa_fea[..., 0, :, :] += msa_fea_up
             pair_fea = add(pair_fea, pair_fea_up, inplace=False)
+            if profile:
+                _sync(); timings['recycle_embed'] = time.time() - t1
 
+        if profile:
+            _sync(); t2 = time.time()
         msa_fea, pair_fea, single_fea = self.e2eformer(
             m=msa_fea,
             z=pair_fea,
@@ -98,16 +123,38 @@ class RhoFold(nn.Module):
             pair_mask=torch.ones(pair_fea.shape[:3]).to(device),
             chunk_size=None,
         )
+        if profile:
+            _sync(); timings['e2eformer'] = time.time() - t2
 
+        if profile:
+            _sync(); t3 = time.time()
         output = self.forward_cords(tokens, single_fea, pair_fea, seq)
+        if profile:
+            _sync(); timings['structure'] = time.time() - t3
 
+        if profile:
+            _sync(); t4 = time.time()
         output.update(self.forward_heads(pair_fea))
+        if profile:
+            _sync(); timings['heads'] = time.time() - t4
 
         recycling_outputs = {
             'single_fea': msa_fea[..., 0, :, :].detach(),
             'pair_fea': pair_fea.detach(),
             "cords_c1'": output["cords_c1'"][-1].detach(),
         }
+        if profile:
+            # Provide a total for this recycle for convenience
+            timings['recycle_total'] = sum(timings.values())
+            output['timings'] = timings
+            if logger is not None:
+                logger.info(f"Recycle timings: "
+                            f"embed_msa={timings.get('embed_msa', 0):.3f}s, "
+                            f"recycle_embed={timings.get('recycle_embed', 0):.3f}s, "
+                            f"e2eformer={timings.get('e2eformer', 0):.3f}s, "
+                            f"structure={timings.get('structure', 0):.3f}s, "
+                            f"heads={timings.get('heads', 0):.3f}s, "
+                            f"total={timings['recycle_total']:.3f}s")
 
         return output, recycling_outputs
 
@@ -115,6 +162,9 @@ class RhoFold(nn.Module):
                 tokens,
                 rna_fm_tokens,
                 seq,
+                *,
+                profile: bool = False,
+                logger: logging.Logger = None,
                 **kwargs):
 
         """Perform the forward pass.
@@ -127,9 +177,22 @@ class RhoFold(nn.Module):
         recycling_inputs = None
 
         outputs = []
+        totals = {'embed_msa': 0.0, 'recycle_embed': 0.0, 'e2eformer': 0.0, 'structure': 0.0, 'heads': 0.0, 'recycle_total': 0.0}
         for _r in range(self.config.model.recycling_embedder.recycles):
             output, recycling_inputs = \
-                self.forward_one_cycle(tokens, rna_fm_tokens, recycling_inputs, seq)
+                self.forward_one_cycle(tokens, rna_fm_tokens, recycling_inputs, seq, profile=profile, logger=logger)
             outputs.append(output)
+            if profile and 'timings' in output:
+                for k in totals:
+                    totals[k] += float(output['timings'].get(k, 0.0))
+
+        if profile and logger is not None and self.config.model.recycling_embedder.recycles > 0:
+            logger.info("Forward totals: "
+                        f"embed_msa={totals['embed_msa']:.3f}s, "
+                        f"recycle_embed={totals['recycle_embed']:.3f}s, "
+                        f"e2eformer={totals['e2eformer']:.3f}s, "
+                        f"structure={totals['structure']:.3f}s, "
+                        f"heads={totals['heads']:.3f}s, "
+                        f"total={totals['recycle_total']:.3f}s")
 
         return outputs

@@ -39,12 +39,13 @@ def main(config):
 
     try:
 
-        logger.info(f'Constructing RhoFold+')
-        model = RhoFold(rhofold_config)
+        with timing('Load Model + Checkpoint', logger=logger):
+            logger.info(f'Constructing RhoFold+')
+            model = RhoFold(rhofold_config)
 
-        logger.info(f'    loading {config.ckpt}')
-        model.load_state_dict(torch.load(config.ckpt, map_location=torch.device('cpu'))['model'])
-        model.eval()
+            logger.info(f'    loading {config.ckpt}')
+            model.load_state_dict(torch.load(config.ckpt, map_location=torch.device('cpu'))['model'])
+            model.eval()
 
         # Input seq, MSA
         logger.info(f"Input FASTA {config.fasta}")
@@ -62,45 +63,51 @@ def main(config):
 
         with timing('RhoFold+ Inference', logger=logger):
 
-            config.device = get_device(config.device)
-            logger.info(f'    Inference using device {config.device}')
-            model = model.to(config.device)
+            with timing('Select/Move Device', logger=logger):
+                config.device = get_device(config.device)
+                logger.info(f'    Inference using device {config.device}')
+                model = model.to(config.device)
 
-            data_dict = get_features(config.fasta, config.msa)
+            with timing('Build Features', logger=logger):
+                data_dict = get_features(config.fasta, config.msa)
 
             # Forward pass
-            outputs = model(tokens=data_dict['tokens'].to(config.device),
-                            rna_fm_tokens=data_dict['rna_fm_tokens'].to(config.device),
-                            seq=data_dict['seq'],
-                            )
+            with timing(f'Forward Pass (recycles={rhofold_config.model.recycling_embedder.recycles})', logger=logger):
+                outputs = model(tokens=data_dict['tokens'].to(config.device),
+                                rna_fm_tokens=data_dict['rna_fm_tokens'].to(config.device),
+                                seq=data_dict['seq'],
+                                profile=getattr(config, 'profile', False),
+                                logger=logger,
+                                )
 
             output = outputs[-1]
 
-            # Secondary structure, .ct format
-            ss_prob_map = torch.sigmoid(output['ss'][0, 0]).data.cpu().numpy()
-            ss_file = f'{config.output_dir}/ss.ct'
-            save_ss2ct(ss_prob_map, data_dict['seq'], ss_file, threshold=0.5)
+            with timing('Save Outputs (.ct + .npz + .pdb)', logger=logger):
+                # Secondary structure, .ct format
+                ss_prob_map = torch.sigmoid(output['ss'][0, 0]).data.cpu().numpy()
+                ss_file = f'{config.output_dir}/ss.ct'
+                save_ss2ct(ss_prob_map, data_dict['seq'], ss_file, threshold=0.5)
 
-            # Dist prob map & Secondary structure prob map, .npz format
-            npz_file = f'{config.output_dir}/results.npz'
-            np.savez_compressed(npz_file,
-                                dist_n=torch.softmax(output['n'].squeeze(0), dim=0).data.cpu().numpy(),
-                                dist_p=torch.softmax(output['p'].squeeze(0), dim=0).data.cpu().numpy(),
-                                dist_c=torch.softmax(output['c4_'].squeeze(0), dim=0).data.cpu().numpy(),
-                                ss_prob_map=ss_prob_map,
-                                plddt=output['plddt'][0].data.cpu().numpy(),
-                                )
+                # Dist prob map & Secondary structure prob map, .npz format
+                npz_file = f'{config.output_dir}/results.npz'
+                np.savez_compressed(npz_file,
+                                    dist_n=torch.softmax(output['n'].squeeze(0), dim=0).data.cpu().numpy(),
+                                    dist_p=torch.softmax(output['p'].squeeze(0), dim=0).data.cpu().numpy(),
+                                    dist_c=torch.softmax(output['c4_'].squeeze(0), dim=0).data.cpu().numpy(),
+                                    ss_prob_map=ss_prob_map,
+                                    plddt=output['plddt'][0].data.cpu().numpy(),
+                                    )
 
-            # Save the prediction
-            unrelaxed_model = f'{config.output_dir}/unrelaxed_model.pdb'
+                # Save the prediction
+                unrelaxed_model = f'{config.output_dir}/unrelaxed_model.pdb'
 
-            # The last cords prediction
-            node_cords_pred = output['cord_tns_pred'][-1].squeeze(0)
-            model.structure_module.converter.export_pdb_file(data_dict['seq'],
-                                                             node_cords_pred.data.cpu().numpy(),
-                                                             path=unrelaxed_model, chain_id=None,
-                                                             confidence=output['plddt'][0].data.cpu().numpy(),
-                                                             logger=logger)
+                # The last cords prediction
+                node_cords_pred = output['cord_tns_pred'][-1].squeeze(0)
+                model.structure_module.converter.export_pdb_file(data_dict['seq'],
+                                                                 node_cords_pred.data.cpu().numpy(),
+                                                                 path=unrelaxed_model, chain_id=None,
+                                                                 confidence=output['plddt'][0].data.cpu().numpy(),
+                                                                 logger=logger)
 
         # Amber relaxation
         if config.relax_steps is not None:
@@ -141,6 +148,9 @@ if __name__ == '__main__':
                         default=1000)
     parser.add_argument("--use-single-seq",
                         help="Default False. If --use_single_seq is set to True, the modeling will run using single sequence only (input_fasta).",
+                        action='store_true')
+    parser.add_argument("--profile",
+                        help="Enable detailed per-step timing logs.",
                         action='store_true')
 
     args = parser.parse_args()
