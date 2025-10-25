@@ -14,6 +14,7 @@ import torch
 import torch.nn as nn
 from typing import Tuple, Sequence, Optional
 from functools import partial
+import logging
 
 from rhofold.model.primitives import Linear, LayerNorm
 from rhofold.model.msa import (
@@ -172,8 +173,23 @@ class E2EformerBlockCore(nn.Module):
         _mask_trans: bool = True,
         _attn_chunk_size: Optional[int] = None,
         _offload_inference: bool = False,
+        *,
+        profile: bool = False,
+        timings_acc: Optional[list] = None,
+        logger: Optional[logging.Logger] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]: 
         #
+        import time
+        def _sync(t):
+            try:
+                if t.is_cuda:
+                    torch.cuda.synchronize()
+                if hasattr(torch, 'mps') and hasattr(torch.mps, 'synchronize'):
+                    torch.mps.synchronize()
+            except Exception:
+                pass
+
+        step_times = {}
         msa_trans_mask = msa_mask if _mask_trans else None
         pair_trans_mask = pair_mask if _mask_trans else None
       
@@ -182,6 +198,8 @@ class E2EformerBlockCore(nn.Module):
 
         m, z = input_tensors
         
+        if profile:
+            _sync(input_tensors[0]); t0 = time.time()
         m = add(
             m,
             self.msa_transition(
@@ -189,6 +207,8 @@ class E2EformerBlockCore(nn.Module):
             ),
             inplace=inplace_safe,
         ) 
+        if profile:
+            _sync(input_tensors[0]); step_times['msa_transition'] = time.time() - t0
 
         if(_offload_inference and inplace_safe):
             del m, z
@@ -196,9 +216,13 @@ class E2EformerBlockCore(nn.Module):
             torch.cuda.empty_cache()
             m, z = input_tensors 
 
+        if profile:
+            _sync(input_tensors[1]); t1 = time.time()
         opm = self.outer_product_mean(
             m, mask=msa_mask, chunk_size=chunk_size, inplace_safe=inplace_safe
         )
+        if profile:
+            _sync(input_tensors[1]); step_times['opm'] = time.time() - t1
 
         if(_offload_inference and inplace_safe):
             del m, z
@@ -209,6 +233,8 @@ class E2EformerBlockCore(nn.Module):
         z = add(z, opm, inplace=inplace_safe)
         del opm
 
+        if profile:
+            _sync(input_tensors[1]); t2 = time.time()
         tmu_update = self.tri_mul_out(
             z,
             mask=pair_mask,
@@ -222,6 +248,8 @@ class E2EformerBlockCore(nn.Module):
         
         del tmu_update
 
+        if profile:
+            _sync(input_tensors[1]); step_times['tri_mul_out'] = time.time() - t2; t3 = time.time()
         tmu_update = self.tri_mul_in(
             z,
             mask=pair_mask,
@@ -235,16 +263,22 @@ class E2EformerBlockCore(nn.Module):
        
         del tmu_update
 
+        if profile:
+            _sync(input_tensors[1]); step_times['tri_mul_in'] = time.time() - t3; t4 = time.time()
         z = add(z,
                 self.tri_att_start(
                     z, 
                     mask=pair_mask, 
                     chunk_size=_attn_chunk_size,
+                    use_memory_efficient_kernel=True,
+                    sdpa_tag='tri_start',
                     inplace_safe=inplace_safe,
 
             ),
             inplace=inplace_safe,
         )
+        if profile:
+            _sync(input_tensors[1]); step_times['tri_att_start'] = time.time() - t4; t5 = time.time()
 
         z = z.transpose(-2, -3)
         if(inplace_safe):
@@ -256,10 +290,14 @@ class E2EformerBlockCore(nn.Module):
                     z,
                     mask=pair_mask.transpose(-1, -2),
                     chunk_size=_attn_chunk_size,
+                    use_memory_efficient_kernel=True,
+                    sdpa_tag='tri_end',
                     inplace_safe=inplace_safe,
             ),
             inplace=inplace_safe,
         )
+        if profile:
+            _sync(input_tensors[1]); step_times['tri_att_end'] = time.time() - t5; t6 = time.time()
 
         z = z.transpose(-2, -3)
         
@@ -273,6 +311,8 @@ class E2EformerBlockCore(nn.Module):
             ),
             inplace=inplace_safe,
         )
+        if profile:
+            _sync(input_tensors[1]); step_times['pair_transition'] = time.time() - t6
 
         if(_offload_inference and inplace_safe):
             device = z.device
@@ -280,6 +320,9 @@ class E2EformerBlockCore(nn.Module):
             input_tensors[0] = input_tensors[0].to(device)
             input_tensors[1] = input_tensors[1].to(device)
             m, z = input_tensors
+
+        if profile and timings_acc is not None:
+            timings_acc.append(step_times)
 
         return m, z
 
@@ -340,7 +383,21 @@ class E2EformerBlock(nn.Module):
         _attn_chunk_size: Optional[int] = None,
         _offload_inference: bool = False,
         _offloadable_inputs: Optional[Sequence[torch.Tensor]] = None,
+        *,
+        profile: bool = False,
+        timings_acc: Optional[list] = None,
+        logger: Optional['logging.Logger'] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+        import time
+        def _sync(t):
+            try:
+                if t.is_cuda:
+                    torch.cuda.synchronize()
+                if hasattr(torch, 'mps') and hasattr(torch.mps, 'synchronize'):
+                    torch.mps.synchronize()
+            except Exception:
+                pass
+        step_times = {}
         if(_attn_chunk_size is None):
             _attn_chunk_size = chunk_size
 
@@ -352,23 +409,33 @@ class E2EformerBlock(nn.Module):
 
         m, z = input_tensors
 
+        if profile:
+            _sync(m); t0 = time.time()
         m = add(m,
                 self.msa_att_row(
                     m, 
                     z=z, 
                     mask=msa_mask, 
                     chunk_size=_attn_chunk_size,
+                    use_memory_efficient_kernel=True,
+                    _sdpa_tag='msa_row',
             ),
             inplace=inplace_safe,
         )
+        if profile:
+            _sync(m); step_times['msa_att_row'] = time.time() - t0; t1 = time.time()
         m = add(m, 
             self.msa_att_col(
                 m, 
                 mask=msa_mask, 
                 chunk_size=chunk_size,
+                use_memory_efficient_kernel=True,
+                _sdpa_tag='msa_col',
             ),
             inplace=inplace_safe,
         )
+        if profile:
+            _sync(m); step_times['msa_att_col'] = time.time() - t1
 
         if(not inplace_safe):
             input_tensors = [m, input_tensors[1]]
@@ -384,7 +451,13 @@ class E2EformerBlock(nn.Module):
             _mask_trans=_mask_trans,
             _attn_chunk_size=_attn_chunk_size,
             _offload_inference=_offload_inference,
+            profile=profile,
+            timings_acc=timings_acc,
+            logger=logger,
         )
+
+        if profile and timings_acc is not None:
+            timings_acc.append(step_times)
 
         return m, z
 
@@ -550,6 +623,9 @@ class E2EformerStack(nn.Module):
         chunk_size: int,
         inplace_safe: bool = False,
         _mask_trans: bool = True,
+        *,
+        profile: bool = False,
+        logger: Optional['logging.Logger'] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Args:
@@ -587,11 +663,22 @@ class E2EformerStack(nn.Module):
 
         def exec(b, a):
             for block in b:
-                a = wrap(block(*a))
+                a = wrap(block(*a, profile=profile, timings_acc=timings_acc, logger=logger))
             return a
 
+        # Accumulate sub-timings across blocks
+        timings_acc = [] if profile else None
         m, z = exec(blocks, (m, z))
 
         s = self.linear(m[..., 0, :, :])
+
+        # Aggregate totals for RhoFold logger
+        if profile:
+            totals = {}
+            for d in (timings_acc or []):
+                for k, v in d.items():
+                    totals[k] = totals.get(k, 0.0) + float(v)
+            # Store for retrieval by caller
+            self.last_profile_totals = totals
 
         return m, z, s

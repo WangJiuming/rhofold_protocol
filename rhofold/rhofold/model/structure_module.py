@@ -11,6 +11,7 @@
 # limitations under the License.
 
 import math
+import time
 from typing import Optional, Tuple, Sequence
 
 from rhofold.model.primitives import Linear, LayerNorm
@@ -759,6 +760,9 @@ class StructureModule(nn.Module):
         rigids=None,
         _offload_inference=False,
         _no_blocks = None,
+        *,
+        profile: bool = False,
+        logger: Optional['logging.Logger'] = None,
     ):
         """
         Args:
@@ -807,8 +811,28 @@ class StructureModule(nn.Module):
         outputs = []
 
         n_blocks_act = self.no_blocks if _no_blocks is None else _no_blocks
+        timings = {
+            'ipa': 0.0,
+            'transition': 0.0,
+            'bb_update': 0.0,
+            'angle_resnet': 0.0,
+            'converter_build': 0.0,
+            'refinenet': 0.0,
+        }
+
+        def _sync():
+            try:
+                # s is [*, N, C], on the active device
+                if s.is_cuda:
+                    torch.cuda.synchronize()
+                if hasattr(torch, 'mps') and hasattr(torch.mps, 'synchronize'):
+                    torch.mps.synchronize()
+            except Exception:
+                pass
         for i in range(n_blocks_act):
             # [*, N, C_s]
+            if profile:
+                _sync(); t0 = time.time()
             s = s + self.ipa(
                 s, 
                 z, 
@@ -817,14 +841,28 @@ class StructureModule(nn.Module):
                 _offload_inference=_offload_inference, 
                 _z_reference_list=z_reference_list
             )
+            if profile:
+                _sync(); timings['ipa'] += time.time() - t0
             s = self.layer_norm_ipa(s)
+            if profile:
+                t1 = time.time()
             s = self.transition(s)
+            if profile:
+                _sync(); timings['transition'] += time.time() - t1
            
             # [*, N]
+            if profile:
+                t2 = time.time()
             rigids = rigids.compose_q_update_vec(self.bb_update(s))
+            if profile:
+                _sync(); timings['bb_update'] += time.time() - t2
 
             # [*, N, 7, 2]
+            if profile:
+                t3 = time.time()
             unnormalized_angles, angles = self.angle_resnet(s, s_initial)
+            if profile:
+                _sync(); timings['angle_resnet'] += time.time() - t3
 
             scaled_rigids = rigids.scale_translation(self.trans_scale_factor)
             
@@ -849,12 +887,23 @@ class StructureModule(nn.Module):
 
         outputs = dict_multimap(torch.stack, outputs)
 
+        if profile:
+            t4 = time.time()
         cords, mask = self.converter.build_cords(seq, outputs['frames'][-1], outputs['angles'][-1], rtn_cmsk=True)
+        if profile:
+            timings['converter_build'] += time.time() - t4
         cord_list = [[cords, mask]]
         if self.refinenet is not None:
+            if profile:
+                t5 = time.time()
             outputs['cord_tns_pred'] = [ self.refinenet(msa_tokens, cord[0].reshape([s.shape[0], -1, 3])) for cord in cord_list]
+            if profile:
+                timings['refinenet'] += time.time() - t5
         else:
             outputs['cord_tns_pred'] = [ cord[0].reshape([s.shape[0], -1, 3]) for cord in cord_list]
         outputs["cords_c1'"] = [cord[0][:, 1, :].unsqueeze(0) for cord in cord_list]
+
+        if profile:
+            outputs['timings_structure_sub'] = timings
 
         return outputs

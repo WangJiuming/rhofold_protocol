@@ -252,6 +252,7 @@ class MSAAttention(nn.Module):
         inplace_safe: bool = False,
         _chunk_logits: Optional[int] = None,
         _checkpoint_chunks: Optional[bool] = None,
+        _sdpa_tag: Optional[str] = None,
     ) -> torch.Tensor:
         """
         Args:
@@ -296,6 +297,8 @@ class MSAAttention(nn.Module):
                 q_x=m, 
                 kv_x=m, 
                 biases=biases,
+                use_memory_efficient_kernel=use_memory_efficient_kernel,
+                sdpa_tag=_sdpa_tag,
             )
 
         return m
@@ -370,6 +373,8 @@ class MSAColumnAttention(nn.Module):
         m: torch.Tensor, 
         mask: Optional[torch.Tensor] = None, 
         chunk_size: Optional[int] = None,
+        use_memory_efficient_kernel: bool = False,
+        _sdpa_tag: Optional[str] = None,
     ) -> torch.Tensor:
         """
         Args:
@@ -387,7 +392,7 @@ class MSAColumnAttention(nn.Module):
         if mask is not None:
             mask = mask.transpose(-1, -2)
 
-        m = self._msa_att(m, mask=mask, chunk_size=chunk_size)
+        m = self._msa_att(m, mask=mask, chunk_size=chunk_size, use_memory_efficient_kernel=use_memory_efficient_kernel, _sdpa_tag=_sdpa_tag)
 
         # [*, N_seq, N_res, C_in]
         m = m.transpose(-2, -3)

@@ -15,6 +15,7 @@ from typing import Optional, List, Tuple
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from rhofold.utils.tensor_utils import (
     permute_final_dims,
@@ -105,6 +106,21 @@ save_png = False
 msa_depth = None
 
 #@torch.jit.script
+_SDPA_STATS = {}
+
+
+def _bump_sdpa(tag: str, used: bool):
+    if tag not in _SDPA_STATS:
+        _SDPA_STATS[tag] = {'used': 0, 'fallback': 0}
+    _SDPA_STATS[tag]['used' if used else 'fallback'] += 1
+
+
+def get_and_reset_sdpa_stats():
+    stats = {k: v.copy() for k, v in _SDPA_STATS.items()}
+    _SDPA_STATS.clear()
+    return stats
+
+
 def _attention(query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, biases: List[torch.Tensor]) -> torch.Tensor:
     # [*, H, C_hidden, K]
     key = permute_final_dims(key, (1, 0))
@@ -262,7 +278,8 @@ class Attention(nn.Module):
         k = k.transpose(-2, -3)
         v = v.transpose(-2, -3)
 
-        q /= math.sqrt(self.c_hidden)
+        # Defer scaling to attention implementation (SDPA scales internally).
+        # For legacy path, we will scale explicitly at the call site if needed.
 
         return q, k, v
 
@@ -290,6 +307,8 @@ class Attention(nn.Module):
         q_x: torch.Tensor,
         kv_x: torch.Tensor,
         biases: Optional[List[torch.Tensor]] = None,
+        use_memory_efficient_kernel: bool = False,
+        sdpa_tag: Optional[str] = None,
     ) -> torch.Tensor:
         """
         Args:
@@ -308,9 +327,35 @@ class Attention(nn.Module):
         # [*, H, Q/K, C_hidden]
         q, k, v = self._prep_qkv(q_x, kv_x)
 
+        # Try SDPA when requested/available; fall back to legacy path.
+        use_sdpa = use_memory_efficient_kernel and hasattr(F, 'scaled_dot_product_attention')
+        if use_sdpa:
+            try:
+                # Combine additive biases into one mask; let broadcasting handle shapes.
+                attn_mask = None
+                if biases:
+                    for b in biases:
+                        attn_mask = b if attn_mask is None else (attn_mask + b)
+                    attn_mask = attn_mask.to(dtype=q.dtype)
+
+                # SDPA expects unscaled q; our _prep_qkv already left q unscaled.
+                o = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, dropout_p=0.0, is_causal=False)
+                o = o.transpose(-2, -3)
+                o = self._wrap_up(o, q_x)
+                _bump_sdpa(sdpa_tag or 'generic', True)
+                return o
+            except Exception:
+                # Fallback to legacy path on any failure
+                _bump_sdpa(sdpa_tag or 'generic', False)
+
+        # Legacy attention
+        # Manually scale q for stability in softmax
+        q = q / math.sqrt(self.c_hidden)
         o = _attention(q, k, v, biases)
         o = o.transpose(-2, -3)
         o = self._wrap_up(o, q_x)
+        if use_memory_efficient_kernel:
+            _bump_sdpa(sdpa_tag or 'generic', False)
 
         return o
 

@@ -21,6 +21,7 @@ from rhofold.model.structure_module import StructureModule
 from rhofold.model.heads import DistHead, SSHead, pLDDTHead
 from rhofold.utils.tensor_utils import add
 from rhofold.utils import exists
+from rhofold.model.primitives import get_and_reset_sdpa_stats
 
 
 class RhoFold(nn.Module):
@@ -56,9 +57,9 @@ class RhoFold(nn.Module):
         )
 
 
-    def forward_cords(self, tokens, single_fea, pair_fea, seq):
+    def forward_cords(self, tokens, single_fea, pair_fea, seq, *, profile: bool = False, logger: logging.Logger = None):
 
-        output = self.structure_module.forward(seq, tokens, { "single": single_fea, "pair": pair_fea } )
+        output = self.structure_module.forward(seq, tokens, { "single": single_fea, "pair": pair_fea }, profile=profile, logger=logger)
         output['plddt'] = self.plddt_head(output['single'][-1])
 
         return output
@@ -122,15 +123,46 @@ class RhoFold(nn.Module):
             msa_mask=torch.ones(msa_fea.shape[:3]).to(device),
             pair_mask=torch.ones(pair_fea.shape[:3]).to(device),
             chunk_size=None,
+            profile=profile,
+            logger=logger,
         )
         if profile:
             _sync(); timings['e2eformer'] = time.time() - t2
+            # Log sub-totals if available
+            if logger is not None and hasattr(self.e2eformer, 'last_profile_totals'):
+                subtotals = self.e2eformer.last_profile_totals
+                logger.info("  E2Eformer sub: "
+                            f"msa_att_row={subtotals.get('msa_att_row', 0.0):.3f}s, "
+                            f"msa_att_col={subtotals.get('msa_att_col', 0.0):.3f}s, "
+                            f"opm={subtotals.get('opm', 0.0):.3f}s, "
+                            f"tri_mul_out={subtotals.get('tri_mul_out', 0.0):.3f}s, "
+                            f"tri_mul_in={subtotals.get('tri_mul_in', 0.0):.3f}s, "
+                            f"tri_att_start={subtotals.get('tri_att_start', 0.0):.3f}s, "
+                            f"tri_att_end={subtotals.get('tri_att_end', 0.0):.3f}s, "
+                            f"pair_transition={subtotals.get('pair_transition', 0.0):.3f}s")
+                # SDPA usage summary
+                sdpa_stats = get_and_reset_sdpa_stats()
+                if sdpa_stats:
+                    parts = []
+                    for tag in sorted(sdpa_stats.keys()):
+                        st = sdpa_stats[tag]
+                        parts.append(f"{tag}: used={st['used']}, fallback={st['fallback']}")
+                    logger.info("  SDPA usage: " + "; ".join(parts))
 
         if profile:
             _sync(); t3 = time.time()
-        output = self.forward_cords(tokens, single_fea, pair_fea, seq)
+        output = self.forward_cords(tokens, single_fea, pair_fea, seq, profile=profile, logger=logger)
         if profile:
             _sync(); timings['structure'] = time.time() - t3
+            if logger is not None and 'timings_structure_sub' in output:
+                st = output['timings_structure_sub']
+                logger.info("  Structure sub: "
+                            f"ipa={st.get('ipa', 0.0):.3f}s, "
+                            f"transition={st.get('transition', 0.0):.3f}s, "
+                            f"bb_update={st.get('bb_update', 0.0):.3f}s, "
+                            f"angle_resnet={st.get('angle_resnet', 0.0):.3f}s, "
+                            f"converter_build={st.get('converter_build', 0.0):.3f}s, "
+                            f"refinenet={st.get('refinenet', 0.0):.3f}s")
 
         if profile:
             _sync(); t4 = time.time()
