@@ -514,9 +514,10 @@ class InvariantPointAttention(nn.Module):
         a = self.softmax(a)
 
         # [*, N_res, H, C_hidden]
-        o = torch.matmul(
-            a, v.transpose(-2, -3).to(dtype=a.dtype)
-        ).transpose(-2, -3)
+        vv = v.transpose(-2, -3)
+        if vv.dtype != a.dtype:
+            vv = vv.to(dtype=a.dtype)
+        o = torch.matmul(a, vv).transpose(-2, -3)
 
         # [*, N_res, H * C_hidden]
         o = flatten_final_dims(o, 2)
@@ -546,17 +547,21 @@ class InvariantPointAttention(nn.Module):
             z[0] = z[0].to(o_pt.device)
 
         # [*, N_res, H, C_z]
-        o_pair = torch.matmul(a.transpose(-2, -3), z[0].to(dtype=a.dtype))
+        z0 = z[0]
+        if z0.dtype != a.dtype:
+            z0m = z0.to(dtype=a.dtype)
+        else:
+            z0m = z0
+        o_pair = torch.matmul(a.transpose(-2, -3), z0m)
 
         # [*, N_res, H * C_z]
         o_pair = flatten_final_dims(o_pair, 2)
 
         # [*, N_res, C_s]
-        s = self.linear_out(
-            torch.cat(
-                (o, *torch.unbind(o_pt, dim=-1), o_pt_norm, o_pair), dim=-1
-            ).to(dtype=z[0].dtype)
-        )
+        cat = torch.cat((o, *torch.unbind(o_pt, dim=-1), o_pt_norm, o_pair), dim=-1)
+        if cat.dtype != s.dtype:
+            cat = cat.to(dtype=s.dtype)
+        s = self.linear_out(cat)
         
         return s
 

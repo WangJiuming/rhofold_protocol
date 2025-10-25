@@ -26,6 +26,9 @@ class RNAConverter():
 
         self.eps = 1e-4
         self.__init()
+        # Cache device/dtype specific tensors to avoid repeated .to(device)
+        # in inner loops. Keys are (device_str, dtype_str).
+        self._device_cache = {}
 
     def __init(self):
         """"""
@@ -77,6 +80,32 @@ class RNAConverter():
 
         self.trans_dict_init = trans_dict_all
 
+    def _ensure_device_cache(self, device: torch.device, dtype: torch.dtype):
+        key = (str(device), str(dtype))
+        if key in self._device_cache:
+            return
+        # Prepare per-residue atom templates on device
+        cord_dict_dev = {}
+        for resd_name, atom_map in self.cord_dict.items():
+            inner = {}
+            for atom_name, t in atom_map.items():
+                inner[atom_name] = t.to(device=device, dtype=dtype, non_blocking=True)
+            cord_dict_dev[resd_name] = inner
+        # Prepare precomputed transforms on device
+        trans_dict_dev = {}
+        for resd_name, tdict in self.trans_dict_init.items():
+            inner = {}
+            for k, (rot, tsl) in tdict.items():
+                inner[k] = (
+                    rot.to(device=device, dtype=dtype, non_blocking=True),
+                    tsl.to(device=device, dtype=dtype, non_blocking=True),
+                )
+            trans_dict_dev[resd_name] = inner
+        self._device_cache[key] = {
+            'cord_dict_dev': cord_dict_dev,
+            'trans_dict_init_dev': trans_dict_dev,
+        }
+
     def build_cords(self, seq, fram, angl, rtn_cmsk=False):
 
         # initialization
@@ -95,16 +124,20 @@ class RNAConverter():
         cord = torch.zeros((n_resds, RNA_CONSTANTS.ATOM_NUM_MAX, 3), dtype=torch.float32, device=device)
         cmsk = torch.zeros((n_resds, RNA_CONSTANTS.ATOM_NUM_MAX), dtype=torch.int8, device=device)
 
+        # Ensure cached constants on active device/dtype
+        self._ensure_device_cache(device, angl.dtype)
+        cache_entry = self._device_cache[(str(device), str(angl.dtype))]
+
         for resd_name in RNA_CONSTANTS.RESD_NAMES:
             idxs = [x for x in range(n_resds) if seq[x] == resd_name]
             if len(idxs) == 0:
                 continue
-            cord[idxs], cmsk[idxs] =\
-                self.__build_cord(resd_name, fram[idxs], fmsk[idxs], angl[idxs], amsk[idxs])
+            cord[idxs], cmsk[idxs] = \
+                self.__build_cord(resd_name, fram[idxs], fmsk[idxs], angl[idxs], amsk[idxs], cache_entry)
 
         return (cord, cmsk) if rtn_cmsk else (cord)
 
-    def __build_cord(self, resd_name, fram, fmsk, angl, amsk):
+    def __build_cord(self, resd_name, fram, fmsk, angl, amsk, cache_entry):
         """"""
 
         # initialization
@@ -128,7 +161,7 @@ class RNAConverter():
         rot_curr, tsl_curr = trans_dict['main']
         atom_names_sel = [x[0] for x in atom_infos_all if x[1] == 0]
         for atom_name_sel in atom_names_sel:
-            cord_vec = self.cord_dict[resd_name][atom_name_sel].to(device)
+            cord_vec = cache_entry['cord_dict_dev'][resd_name][atom_name_sel]
             cord_dict[atom_name_sel] = \
                 tsl_curr + torch.sum(rot_curr * cord_vec.view(1, 1, 3), dim=2)
             cmsk_vec_dict[atom_name_sel] = fmsk[:, 0]
@@ -144,10 +177,9 @@ class RNAConverter():
                 rgrp_name_prev = 'angl_%d' % (int(rgrp_name_curr[-1]) - 1)
 
             rot_prev, tsl_prev = trans_dict[rgrp_name_prev]
-            rot_base, tsl_vec_base = \
-                self.trans_dict_init[resd_name]['%s-%s' % (rgrp_name_curr, rgrp_name_prev)]
-            rot_base = rot_base.unsqueeze(dim=0).to(device)
-            tsl_base = tsl_vec_base.unsqueeze(dim=0).to(device)
+            rot_base, tsl_vec_base = cache_entry['trans_dict_init_dev'][resd_name]['%s-%s' % (rgrp_name_curr, rgrp_name_prev)]
+            rot_base = rot_base.unsqueeze(dim=0)
+            tsl_base = tsl_vec_base.unsqueeze(dim=0)
             
             rot_addi, tsl_addi = calc_angl_rot_tsl(angl[:, idx_rgrp])
             rot_curr, tsl_curr = merge_rot_tsl(
@@ -160,7 +192,7 @@ class RNAConverter():
 
             atom_names_sel = [x[0] for x in atom_infos_all if x[1] == idx_rgrp + 1]
             for atom_name_sel in atom_names_sel:
-                cord_vec = self.cord_dict[resd_name][atom_name_sel].to(device)
+                cord_vec = cache_entry['cord_dict_dev'][resd_name][atom_name_sel]
 
                 cord_dict[atom_name_sel] = \
                     tsl_curr + torch.sum(rot_curr * cord_vec.view(1, 1, 3), dim=2)

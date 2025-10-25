@@ -117,11 +117,14 @@ class RhoFold(nn.Module):
 
         if profile:
             _sync(); t2 = time.time()
+        # Build masks directly on device to avoid host->device copies
+        msa_mask = msa_fea.new_ones(msa_fea.shape[:3])
+        pair_mask = pair_fea.new_ones(pair_fea.shape[:3])
         msa_fea, pair_fea, single_fea = self.e2eformer(
             m=msa_fea,
             z=pair_fea,
-            msa_mask=torch.ones(msa_fea.shape[:3]).to(device),
-            pair_mask=torch.ones(pair_fea.shape[:3]).to(device),
+            msa_mask=msa_mask,
+            pair_mask=pair_mask,
             chunk_size=None,
             profile=profile,
             logger=logger,

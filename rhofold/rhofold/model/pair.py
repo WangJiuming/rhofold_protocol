@@ -54,22 +54,35 @@ class PositionalEncoding2D(nn.Module):
         self.register_buffer('div_term', div_term)
 
     def forward(self, x, idx_s):
+        """Vectorized 2D sinusoidal positional encoding.
+        Args:
+            x: [B, L, L, K]
+            idx_s: [B, L] integer positions
+        """
         B, L, _, K = x.shape
         K_half = K // 2
-        pe = torch.zeros_like(x)
-        i_batch = -1
-        for idx in idx_s:
-            i_batch += 1
 
-            if idx.device != self.div_term.device:
-                idx = idx.to(self.div_term.device)
+        # Move buffers to the correct device/dtype once
+        div_term = self.div_term
+        if div_term.device != x.device or div_term.dtype != x.dtype:
+            div_term = div_term.to(device=x.device, dtype=x.dtype)
 
-            sin_inp = idx.unsqueeze(1) * self.div_term
-            emb = torch.cat((sin_inp.sin(), sin_inp.cos()), dim=-1)
-            pe[i_batch, :, :, :K_half] = emb.unsqueeze(1)
-            pe[i_batch, :, :, K_half:] = emb.unsqueeze(0)
+        idx = idx_s
+        if idx.device != x.device:
+            idx = idx.to(x.device)
+        if not torch.is_floating_point(idx):
+            idx = idx.to(x.dtype)
 
-        x = x + torch.autograd.Variable(pe, requires_grad=False)
+        # [B, L, K_half/2]; concat sin/cos -> [B, L, K_half]
+        sin_inp = idx.unsqueeze(-1) * div_term.view(1, 1, -1)
+        emb = torch.cat((sin_inp.sin(), sin_inp.cos()), dim=-1)
+
+        # Left half encodes row positions (broadcast over columns)
+        x_left = x[..., :K_half] + emb.unsqueeze(2)
+        # Right half encodes column positions (broadcast over rows)
+        x_right = x[..., K_half:] + emb.unsqueeze(1)
+
+        x = torch.cat((x_left, x_right), dim=-1)
         return self.drop(x)
 
 class PairEmbNet(nn.Module):

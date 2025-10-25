@@ -547,13 +547,14 @@ class Rotation:
                 The rotation as a rotation matrix tensor
         """
         rot_mats = self._rot_mats
-        if(rot_mats is None):
-            if(self._quats is None):
+        if rot_mats is None:
+            if self._quats is None:
                 raise ValueError("Both rotations are None")
-            else:
-                rot_mats = quat_to_rot(self._quats)
+            # Cache computed rotation matrices to avoid repeated quat->rot
+            rot_mats = quat_to_rot(self._quats)
+            self._rot_mats = rot_mats
 
-        return rot_mats 
+        return rot_mats
 
     def get_quats(self) -> torch.Tensor:
         """
