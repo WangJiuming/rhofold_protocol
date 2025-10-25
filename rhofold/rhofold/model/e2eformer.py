@@ -419,6 +419,7 @@ class E2EformerBlock(nn.Module):
                     chunk_size=_attn_chunk_size,
                     use_memory_efficient_kernel=True,
                     _sdpa_tag='msa_row',
+                    _profile_tag='msa_row',
             ),
             inplace=inplace_safe,
         )
@@ -428,9 +429,10 @@ class E2EformerBlock(nn.Module):
             self.msa_att_col(
                 m, 
                 mask=msa_mask, 
-                chunk_size=chunk_size,
+                chunk_size=_attn_chunk_size,
                 use_memory_efficient_kernel=True,
                 _sdpa_tag='msa_col',
+                _profile_tag='msa_col',
             ),
             inplace=inplace_safe,
         )

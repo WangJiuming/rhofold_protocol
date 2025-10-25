@@ -4,6 +4,7 @@ import sys
 
 import numpy as np
 import torch
+import contextlib
 
 from rhofold.config import rhofold_config
 from rhofold.relax.relax import AmberRelaxation
@@ -39,6 +40,10 @@ def main(config):
 
     try:
 
+        # Optional runtime overrides
+        if getattr(config, 'recycles', None) is not None:
+            rhofold_config.model.recycling_embedder.recycles = int(config.recycles)
+
         with timing('Load Model + Checkpoint', logger=logger):
             logger.info(f'Constructing RhoFold+')
             model = RhoFold(rhofold_config)
@@ -68,17 +73,43 @@ def main(config):
                 logger.info(f'    Inference using device {config.device}')
                 model = model.to(config.device)
 
+            # Configure AMP if requested and supported
+            amp_enabled = bool(getattr(config, 'amp', False))
+            amp_device_type = None
+            if amp_enabled:
+                if str(config.device).startswith('cuda'):
+                    amp_device_type = 'cuda'
+                    # Allow TF32 for additional speed on Ampere+
+                    try:
+                        torch.backends.cuda.matmul.allow_tf32 = True
+                        torch.backends.cudnn.allow_tf32 = True
+                        if hasattr(torch, 'set_float32_matmul_precision'):
+                            torch.set_float32_matmul_precision('high')
+                    except Exception:
+                        pass
+                elif str(config.device) == 'mps':
+                    logger.warning('AMP is disabled on MPS; running in FP32.')
+                    amp_enabled = False
+                else:
+                    logger.warning('AMP requested but not supported on device %s; running in FP32.', config.device)
+                    amp_enabled = False
+
             with timing('Build Features', logger=logger):
                 data_dict = get_features(config.fasta, config.msa)
 
             # Forward pass
             with timing(f'Forward Pass (recycles={rhofold_config.model.recycling_embedder.recycles})', logger=logger):
-                outputs = model(tokens=data_dict['tokens'].to(config.device),
-                                rna_fm_tokens=data_dict['rna_fm_tokens'].to(config.device),
-                                seq=data_dict['seq'],
-                                profile=getattr(config, 'profile', False),
-                                logger=logger,
-                                )
+                autocast_ctx = (
+                    torch.autocast(device_type=amp_device_type, dtype=(torch.bfloat16 if amp_device_type == 'cuda' else torch.float16))
+                    if amp_enabled and amp_device_type is not None else contextlib.nullcontext()
+                )
+                with autocast_ctx:
+                    outputs = model(tokens=data_dict['tokens'].to(config.device),
+                                    rna_fm_tokens=data_dict['rna_fm_tokens'].to(config.device),
+                                    seq=data_dict['seq'],
+                                    profile=getattr(config, 'profile', False),
+                                    logger=logger,
+                                    )
 
             output = outputs[-1]
 
@@ -146,11 +177,19 @@ if __name__ == '__main__':
     parser.add_argument("--relax-steps",
                         help="Num of steps for structure refinement, default 1000.",
                         default=1000)
+    parser.add_argument("--recycles",
+                        type=int,
+                        help="Override the number of recycling iterations (default from config).",
+                        default=None)
     parser.add_argument("--use-single-seq",
                         help="Default False. If --use_single_seq is set to True, the modeling will run using single sequence only (input_fasta).",
                         action='store_true')
     parser.add_argument("--profile",
                         help="Enable detailed per-step timing logs.",
+                        action='store_true')
+    parser.add_argument("--amp", "--mixed-precision",
+                        dest='amp',
+                        help="Enable automated mixed precision. Uses bfloat16 on CUDA; disabled on MPS.",
                         action='store_true')
 
     args = parser.parse_args()

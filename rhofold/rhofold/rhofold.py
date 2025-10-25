@@ -22,6 +22,7 @@ from rhofold.model.heads import DistHead, SSHead, pLDDTHead
 from rhofold.utils.tensor_utils import add
 from rhofold.utils import exists
 from rhofold.model.primitives import get_and_reset_sdpa_stats
+from rhofold.model.msa import get_and_reset_msa_att_stats
 
 
 class RhoFold(nn.Module):
@@ -117,8 +118,13 @@ class RhoFold(nn.Module):
 
         if profile:
             _sync(); t2 = time.time()
-        # Build masks directly on device to avoid host->device copies
-        msa_mask = msa_fea.new_ones(msa_fea.shape[:3])
+        # Build masks on-device. Mask only PAD; keep '-' (gap) as a legitimate token.
+        # This matches common MSA-model practice (gap is part of the vocabulary
+        # and should participate in attention), and preserves checkpoint behavior.
+        pad_idx = self.msa_embedder.alphabet.padding_idx
+        msa_mask = (msa_tokens_pert != pad_idx)
+        msa_mask = msa_mask.to(dtype=msa_fea.dtype, device=msa_fea.device)
+        # Pair mask remains dense; target row rarely has gaps and cropping is not used here.
         pair_mask = pair_fea.new_ones(pair_fea.shape[:3])
         msa_fea, pair_fea, single_fea = self.e2eformer(
             m=msa_fea,
@@ -151,6 +157,14 @@ class RhoFold(nn.Module):
                         st = sdpa_stats[tag]
                         parts.append(f"{tag}: used={st['used']}, fallback={st['fallback']}")
                     logger.info("  SDPA usage: " + "; ".join(parts))
+                # MSA attention sub-timers (mask_bias, pair_bias, attn)
+                msa_stats = get_and_reset_msa_att_stats()
+                if msa_stats:
+                    line = []
+                    for tag in sorted(msa_stats.keys()):
+                        d = msa_stats[tag]
+                        line.append(f"{tag}: mask_bias={d.get('mask_bias', 0.0):.3f}s, pair_bias={d.get('pair_bias', 0.0):.3f}s, attn={d.get('attn', 0.0):.3f}s")
+                    logger.info("  MSA attn sub: " + "; ".join(line))
 
         if profile:
             _sync(); t3 = time.time()

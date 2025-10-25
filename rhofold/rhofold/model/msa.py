@@ -13,6 +13,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import Optional, List, Tuple
+import time
 
 from rhofold.model.primitives import (
     Linear, 
@@ -25,6 +26,41 @@ from rhofold.utils.chunk_utils import chunk_layer
 from rhofold.utils.tensor_utils import (
     permute_final_dims,
 )
+
+# Lightweight profiling for MSA attention pieces
+_MSA_ATT_STATS = {}
+
+
+def _device_sync_if_available(x: torch.Tensor) -> None:
+    """Synchronize device streams to make profiling times meaningful.
+
+    This is a no-op on backends without async execution. Only used when
+    a profiling tag is provided so it does not affect normal inference.
+    """
+    try:
+        # CUDA
+        if x.is_cuda:
+            torch.cuda.synchronize()
+        # Apple MPS
+        if hasattr(torch, 'mps') and hasattr(torch.mps, 'synchronize'):
+            torch.mps.synchronize()
+    except Exception:
+        # Best-effort sync only
+        pass
+
+def _msa_bump(tag: Optional[str], key: str, dt: float):
+    if tag is None:
+        return
+    d = _MSA_ATT_STATS.get(tag)
+    if d is None:
+        d = { 'mask_bias': 0.0, 'pair_bias': 0.0, 'attn': 0.0 }
+        _MSA_ATT_STATS[tag] = d
+    d[key] += float(dt)
+
+def get_and_reset_msa_att_stats():
+    stats = {k: v.copy() for k, v in _MSA_ATT_STATS.items()}
+    _MSA_ATT_STATS.clear()
+    return stats
 
 
 class LearnedPositionalEmbedding(nn.Embedding):
@@ -168,6 +204,7 @@ class MSAAttention(nn.Module):
         z: Optional[torch.Tensor],
         mask: Optional[torch.Tensor],
         inplace_safe: bool = False,
+        profile_tag: Optional[str] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]: 
         n_seq, n_res = m.shape[-3:-1]
         if mask is None:
@@ -177,28 +214,36 @@ class MSAAttention(nn.Module):
             )
 
         # [*, N_seq, 1, 1, N_res]
+        t0 = time.time()
         mask_bias = (self.inf * (mask - 1))[..., :, None, None, :]
+        if profile_tag is not None:
+            _device_sync_if_available(mask_bias)
+        _msa_bump(profile_tag, 'mask_bias', time.time() - t0)
 
         if (self.pair_bias and 
             z is not None and                       # For the 
             self.layer_norm_z is not None and       # benefit of
             self.linear_z is not None               # TorchScript
         ):
-            chunks = []
-
-            for i in range(0, z.shape[-3], 256):
-                z_chunk = z[..., i: i + 256, :, :]
-
-                # [*, N_res, N_res, C_z]
-                z_chunk = self.layer_norm_z(z_chunk)
-            
+            # Fast path for small N_res: avoid chunked loop and concat
+            n_res = z.shape[-3]
+            chunk_thresh = 256
+            t1 = time.time()
+            if n_res <= chunk_thresh:
                 # [*, N_res, N_res, no_heads]
-                z_chunk = self.linear_z(z_chunk)
+                z = self.linear_z(self.layer_norm_z(z))
+            else:
+                chunks = []
+                for i in range(0, n_res, chunk_thresh):
+                    z_chunk = z[..., i: i + chunk_thresh, :, :]
+                    z_chunk = self.layer_norm_z(z_chunk)
+                    z_chunk = self.linear_z(z_chunk)
+                    chunks.append(z_chunk)
+                z = torch.cat(chunks, dim=-3)
+            if profile_tag is not None:
+                _device_sync_if_available(z)
+            _msa_bump(profile_tag, 'pair_bias', time.time() - t1)
 
-                chunks.append(z_chunk)
-            
-            z = torch.cat(chunks, dim=-3)
-            
             # [*, 1, no_heads, N_res, N_res]
             z = permute_final_dims(z, (2, 0, 1)).unsqueeze(-4)
 
@@ -222,7 +267,7 @@ class MSAAttention(nn.Module):
 
         def _get_qkv(m, z):
             m, mask_bias, z = self._prep_inputs(
-                m, z, mask, inplace_safe=inplace_safe
+                m, z, mask, inplace_safe=inplace_safe, profile_tag=None
             )
             q, k, v = self.mha._prep_qkv(m, m)
             return m, q, k, v, mask_bias, z
@@ -253,6 +298,7 @@ class MSAAttention(nn.Module):
         _chunk_logits: Optional[int] = None,
         _checkpoint_chunks: Optional[bool] = None,
         _sdpa_tag: Optional[str] = None,
+        _profile_tag: Optional[str] = None,
     ) -> torch.Tensor:
         """
         Args:
@@ -278,13 +324,16 @@ class MSAAttention(nn.Module):
             )           
 
         m, mask_bias, z = self._prep_inputs(
-            m, z, mask, inplace_safe=inplace_safe
+            m, z, mask, inplace_safe=inplace_safe, profile_tag=_profile_tag
         )
 
         biases = [mask_bias]
         if(z is not None):
             biases.append(z)
 
+        t_attn = time.time()
+        if _profile_tag is not None:
+            _device_sync_if_available(m)
         if chunk_size is not None:
             m = self._chunk(
                 m, 
@@ -300,6 +349,9 @@ class MSAAttention(nn.Module):
                 use_memory_efficient_kernel=use_memory_efficient_kernel,
                 sdpa_tag=_sdpa_tag,
             )
+        if _profile_tag is not None:
+            _device_sync_if_available(m)
+        _msa_bump(_profile_tag, 'attn', time.time() - t_attn)
 
         return m
 
@@ -375,6 +427,7 @@ class MSAColumnAttention(nn.Module):
         chunk_size: Optional[int] = None,
         use_memory_efficient_kernel: bool = False,
         _sdpa_tag: Optional[str] = None,
+        _profile_tag: Optional[str] = None
     ) -> torch.Tensor:
         """
         Args:
@@ -392,7 +445,7 @@ class MSAColumnAttention(nn.Module):
         if mask is not None:
             mask = mask.transpose(-1, -2)
 
-        m = self._msa_att(m, mask=mask, chunk_size=chunk_size, use_memory_efficient_kernel=use_memory_efficient_kernel, _sdpa_tag=_sdpa_tag)
+        m = self._msa_att(m, mask=mask, chunk_size=chunk_size, use_memory_efficient_kernel=use_memory_efficient_kernel, _sdpa_tag=_sdpa_tag, _profile_tag=_profile_tag)
 
         # [*, N_seq, N_res, C_in]
         m = m.transpose(-2, -3)
