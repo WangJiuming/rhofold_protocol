@@ -11,7 +11,7 @@
 # limitations under the License.
 
 from functools import partial
-from typing import List
+from typing import List, Tuple
 
 import torch
 import torch.nn as nn
@@ -36,6 +36,36 @@ def permute_final_dims(tensor: torch.Tensor, inds: List[int]):
 
 def flatten_final_dims(t: torch.Tensor, no_dims: int):
     return t.reshape(t.shape[:-no_dims] + (-1,))
+
+
+def _flatten_batch_dims_for_matmul(t: torch.Tensor) -> Tuple[torch.Tensor, torch.Size]:
+    """Collapse all batch dims so matmul operates on 3D tensors."""
+    batch_shape = t.shape[:-2]
+    t = t.reshape(-1, t.shape[-2], t.shape[-1])
+    return t, batch_shape
+
+
+def _restore_batch_dims_from_matmul(t: torch.Tensor, batch_shape: torch.Size) -> torch.Tensor:
+    """Restore the tensor flattened via _flatten_batch_dims_for_matmul."""
+    return t.reshape(batch_shape + t.shape[-2:])
+
+
+def safe_matmul(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    """
+    Wrapper around torch.matmul that flattens batch dimensions before the
+    multiplication. This avoids backend-specific bugs (e.g., on MPS) when
+    contracting tensors with more than 3 dims while preserving the original shape.
+    """
+    if a.ndim <= 3 and b.ndim <= 3:
+        return torch.matmul(a, b)
+
+    if a.shape[:-2] != b.shape[:-2]:
+        raise ValueError(f"safe_matmul expects identical batch dims, got {a.shape} vs {b.shape}")
+
+    a_flat, batch_shape = _flatten_batch_dims_for_matmul(a)
+    b_flat, _ = _flatten_batch_dims_for_matmul(b)
+    out = torch.matmul(a_flat, b_flat)
+    return _restore_batch_dims_from_matmul(out, batch_shape)
 
 
 def masked_mean(mask, value, dim, eps=1e-4):

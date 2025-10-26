@@ -20,6 +20,7 @@ import torch.nn.functional as F
 from rhofold.utils.tensor_utils import (
     permute_final_dims,
     flatten_final_dims,
+    safe_matmul,
 )
 
 def _prod(nums):
@@ -126,7 +127,7 @@ def _attention(query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, bias
     key = permute_final_dims(key, (1, 0))
 
     # [*, H, Q, K]
-    a = torch.matmul(query, key)
+    a = safe_matmul(query, key)
 
     for b in biases:
         a += b
@@ -151,7 +152,7 @@ def _attention(query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, bias
         #             plt.savefig(f'{attn_map_dir}/attn_map/tmp-{a_c}-{i}.png')
 
     # [*, H, Q, C_hidden]
-    a = torch.matmul(a, value)
+    a = safe_matmul(a, value)
 
     return a
 
@@ -329,6 +330,9 @@ class Attention(nn.Module):
 
         # Try SDPA when requested/available; fall back to legacy path.
         use_sdpa = use_memory_efficient_kernel and hasattr(F, 'scaled_dot_product_attention')
+        # PyTorch's SDPA kernels are unstable on MPS for some sequence shapes
+        if use_sdpa and q.device.type == 'mps':
+            use_sdpa = False
         if use_sdpa:
             try:
                 # Combine additive biases into one mask; let broadcasting handle shapes.
@@ -408,7 +412,7 @@ class GlobalAttention(nn.Module):
         bias = (self.inf * (mask - 1))[..., :, None, :]
 
         # [*, N_res, H, N_seq]
-        a = torch.matmul(
+        a = safe_matmul(
             q,
             k.transpose(-1, -2),  # [*, N_res, C_hidden, N_seq]
         )
@@ -416,7 +420,7 @@ class GlobalAttention(nn.Module):
         a = softmax_no_cast(a)
 
         # [*, N_res, H, C_hidden]
-        o = torch.matmul(
+        o = safe_matmul(
             a,
             v,
         )
