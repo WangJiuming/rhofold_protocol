@@ -203,7 +203,7 @@ For questions or comments, please feel free to post an issue or reach the author
 
 ## Acknowledgement
 
-We thank the inspiring work of OpenFold [8] and rMSA [6] as well as resources from Rfam [2], RNAcentral [3], PDB [4], and nt [5], which have made this work possible.
+We thank the inspiring work of OpenFold [8] and rMSA [6] as well as valuable resources from Rfam [2], RNAcentral [3], PDB [4], and nt [5], which have made this work possible.
 
 ## References
 
