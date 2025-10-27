@@ -54,7 +54,7 @@ conda activate rhofold_protocol
 ```
 The pre-trained model checkpoint used in this protocol can be downloaded from the huggingface repository via the following. The estimated download time is one minute.
 ```bash
-wget https://huggingface.co/cuhkaih/rhofold/resolve/main/rhofold_pretrained_params.pt -O rhofold_pretrained_params.pt checkpoints/
+wget https://huggingface.co/cuhkaih/rhofold/resolve/main/rhofold_pretrained_params.pt -O checkpoints/rhofold_pretrained_params.pt 
 ```
 In case the above link is unavailable, the checkpoint can also be downloaded manually using the <a href="https://drive.google.com/file/d/1WPB-gNwm5XucU9LT8Rmi6yrzbLJGm5ka/view?usp=sharing">alternate link</a>.
 
