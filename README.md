@@ -56,7 +56,7 @@ In case the above link is unavailable, the checkpoint can also be downloaded man
 
 Now, RhoFold+ is ready for structure prediction by executing the following. Note that the model is configured to use GPU device `cuda:0` by setting the argument `--device cuda:0`.
 ```bash
-python rhofold/inference.py --input_fasta ./data/rhofold/3owz_A/3owz_A.fasta --input_msa ./data/rhofold/3owz_A/3owz_A.afa --output_dir ./results/rhofold/3owz_A --device cuda:0 
+python rhofold/inference.py --fasta ./data/rhofold/3owz_A/3owz_A.fasta --msa ./data/rhofold/3owz_A/3owz_A.afa --output_dir ./results/rhofold/3owz_A --device cuda:0 
 ```
 Then, users may check the outputs located at the directory specified by the `--output_dir` argument, which should contain the following files.
 ```bash
