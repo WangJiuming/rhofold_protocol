@@ -36,6 +36,8 @@ Detailed steps for each stage and suggestions on how to choose the configuration
 
 The details of each step is described in the protocol. Here, we briefly outline (a) how to download and install the dependencies for this repository, corresponding to the equipment setup section's mandatory steps in the protocol, and (b) how to perform a quick structure prediction with the working example given in this protocol.
 
+**Note**: The instructions below are based on a Linux operating system with CUDA 12.4.
+
 ```
 git clone https://github.com/WangJiuming/rhofold_protocol.git
 cd rhofold_protocol
@@ -56,9 +58,9 @@ In case the above link is unavailable, the checkpoint can also be downloaded man
 
 Now, RhoFold+ is ready for structure prediction by executing the following. Note that the model is configured to use GPU device `cuda:0` by setting the argument `--device cuda:0`.
 ```bash
-python rhofold/inference.py --fasta ./data/rhofold/3owz_A/3owz_A.fasta --msa ./data/rhofold/3owz_A/3owz_A.afa --output_dir ./results/rhofold/3owz_A --device cuda:0 
+python rhofold/inference.py --fasta ./data/rhofold/3owz_A/3owz_A.fasta --msa ./data/rhofold/3owz_A/3owz_A.afa --output-dir ./results/rhofold/3owz_A --device cuda:0 
 ```
-Then, users may check the outputs located at the directory specified by the `--output_dir` argument, which should contain the following files.
+Then, users may check the outputs located at the directory specified by the `--output-dir` argument, which should contain the following files.
 ```bash
 - results/rhofold/3owz_A/
                     |- log.txt  # log of the inference
