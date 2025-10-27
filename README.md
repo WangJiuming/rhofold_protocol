@@ -180,20 +180,30 @@ options:
 ```
 Throughout this protocol's scripts, we consistently use flags like `--pdb`, `--npz`, `--fasta`, and `--msa` to indicate the paths to the input files, use flags like `--output-dir` to indicate the output directory when multiple files are saved together, and use flags like `--save-plot`, `--save-db` to indicate paths to specific output files.
 
-### Version of the codes in this repository
+### Version and licenses of the codes in this repository
 
 This codebase adapts the codes from our previous work RhoFold+ [1] and the codes from rMSA2 [6]. The exact version of these two methods are as follows.
 
 - `RhoFold+` from its <a href='https://github.com/ml4bio/RhoFold/tree/df930033dd40c6c3f923dcafcdc16cf50eb742c8'>official GitHub repo</a>, commit `df93003`.
 - `rMSA` from its <a href='https://github.com/kad-ecoli/rMSA2'>official GitHub repo</a>, commit `3fa7c22`.
 
-Note that the codes for RhoFold+ has been adapted from the official release, including command-line arguments, checkpoint loading, and RNA-FM embedding generation.
+Note that the codes for RhoFold+ has been adapted from the official release, including command-line arguments, checkpoint loading, and RNA-FM embedding generation. 
 
 Users may also be aware of the <a href='https://github.com/ml4bio/RNA-FM'>RNA-FM repository</a>. In this protocol, since our main focus is on 3D structure modeling, we only use the codes from the RhoFold+ repository, which includes the same RNA-FM model and can also perform its core functions such as embedding generation.
+
+## License
+
+The codes for this protocol are licensed under Apache License 2.0. 
+
+This repository incorporates codes from third-party projects with the following licenses. The adapted codes from RhoFold+ are licensed under Apache License 2.0 (see `rhofold/LICENSE`). The codes from rMSA are licensed under GNU General Public License v2.0 or later (see `rmsa/LICENSE` and `rmsa/README.md`).
 
 ## Contact
 
 For questions or comments, please feel free to post an issue or reach the author at jmwang@link.cuhk.edu.hk.
+
+## Acknowledgement
+
+We thank the inspiring work of OpenFold [8] and rMSA [6] as well as resources from Rfam [2], RNAcentral [3], PDB [4], and nt [5], which have made this work possible.
 
 ## References
 
@@ -210,3 +220,5 @@ For questions or comments, please feel free to post an issue or reach the author
 [6] Zhang, Chengxin, Yang Zhang, and Anna Marie Pyle. "rMSA: a sequence search and alignment algorithm to improve RNA structure modeling." Journal of Molecular Biology 435.14 (2023): 167904.
 
 [7] Lu, Xiang-Jun, Harmen J. Bussemaker, and Wilma K. Olson. "DSSR: an integrated software tool for dissecting the spatial structure of RNA." Nucleic acids research 43.21 (2015): e142-e142.
+
+[8] Ahdritz, Gustaf, et al. "OpenFold: Retraining AlphaFold2 yields new insights into its learning mechanisms and capacity for generalization." Nature methods 21.8 (2024): 1514-1524.
