@@ -8,6 +8,9 @@ data/
 !data/rhofold/3owz_A/
 !data/rnafm/rf02684/
 
+# for the msa database
+msa_database/db/
+
 # for the newly produced results
 results/
 
