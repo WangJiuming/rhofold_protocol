@@ -1,6 +1,6 @@
 #!/bin/bash
 
-fasta_path=$!
+fasta_path=$1
 
 db0_path="../msa_database/db/Rfam.cm"
 db1_path="../msa_database/db/rnacentral.fasta"
