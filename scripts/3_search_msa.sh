@@ -2,11 +2,11 @@
 
 fasta_path=$1
 
-db0_path="../msa_database/db/Rfam.cm"
-db1_path="../msa_database/db/rnacentral.fasta"
-db2_path="../msa_database/db/nt"
-db0to1_path="../msa_database/db/rfam_annotations.tsv.gz"
-db0to2_path="../msa_database/db/Rfam.full_region.gz"
+db0_path="./msa_database/db/Rfam.cm"
+db1_path="./msa_database/db/rnacentral.fasta"
+db2_path="./msa_database/db/nt"
+db0to1_path="./msa_database/db/rfam_annotations.tsv.gz"
+db0to2_path="./msa_database/db/Rfam.full_region.gz"
 cpu=32
 
 echo "MSA search started."
