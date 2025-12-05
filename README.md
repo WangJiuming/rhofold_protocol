@@ -157,7 +157,7 @@ Stage 4
 - `11_eval_3d_acc.py`
 - `12_eval_lddt.py`
 - `13_visualize_ss_prob.py`
-- `14_visualize_ss.py`
+- `14_convert_ss.py`
 - `15_eval_2d_acc.py`
 
 Note that:
