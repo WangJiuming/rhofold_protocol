@@ -35,4 +35,4 @@ if __name__ == '__main__':
 
     plt.savefig(save_ss_plot_path, dpi=300, bbox_inches='tight')
     
-    print(f'Secondary structure probability map saved to {save_ss_plot_path}')
+    print(f'Visualized secondary structure probability map saved to {save_ss_plot_path}')
