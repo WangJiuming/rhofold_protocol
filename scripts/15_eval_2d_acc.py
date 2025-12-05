@@ -51,8 +51,6 @@ if __name__ == '__main__':
     pred_cm = np.load(pred_cm_path)
     gt_cm = np.load(gt_cm_path)
     
-    gt_cm = gt_cm[2:5, 2:5]
-
     f1_score, precision, recall, mcc = cal_f1score(pred_cm, gt_cm)
 
     print(f'F1-score = {f1_score:.4f}')
