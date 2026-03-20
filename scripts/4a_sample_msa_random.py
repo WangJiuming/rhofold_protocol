@@ -50,20 +50,22 @@ def sample_sequences(input_path, output_dir, sample_rounds):
     output_dir.mkdir(parents=True, exist_ok=True)
 
     sample_size = 128
-    min_seq_sum = 256
+    min_seq_num = 256
 
     # Load the MSA file
     alignment_df = read_fasta(input_path) 
 
     # If the alignment has fewer than the minimum number of sequences,
     # just copy the input file to the output directory for consistency
-    if len(alignment_df) < min_seq_sum:
+    if len(alignment_df) < min_seq_num:
         # copy the input file to the output directory with the same extension
         # this is because the input file could be in .a3m, .afa, .fa, etc.
-        print(f'Input MSA has only {len(alignment_df)} sequences, which is fewer than the minimum required {min_seq_sum}.')
+        print(f'Input MSA has only {len(alignment_df)} sequences, which is fewer than the minimum required {min_seq_num}.')
+
+        output_path = output_dir / f'original_msa{input_path.suffix}'
+        
         print(f'Copying the original MSA file to {output_path} without sampling.')
         
-        output_path = output_dir / f'original_msa{input_path.suffix}'
         shutil.copy(input_path, output_path)
         
         return

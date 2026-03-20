@@ -98,9 +98,11 @@ def generate_clusters(input_path, output_dir, n_clusters=None):
     # If the number of sequences is less than 256, write the file directly to the output directory
     if len(sequences) < 256:
         print(f'Input MSA has only {len(sequences)} sequences, which is fewer than the minimum required 256.')
-        print(f'Copying the original MSA file to {output_path} without sampling.')
         
         output_path = output_dir / f'original_msa{input_path.suffix}'
+        
+        print(f'Copying the original MSA file to {output_path} without sampling.')
+        
         write_fasta(df, output_path)
         return
 
