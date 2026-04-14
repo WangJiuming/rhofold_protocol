@@ -71,7 +71,31 @@ rhofold_protocol/
 ├── scripts/                      # Analysis/evaluation scripts
 ├── environment.yml               # Conda env (Linux/CUDA)
 ├── environment_mac.yml           # Conda env (macOS)
-└── webgpu/                       # [NEW] WebGPU port lives here
+└── webgpu/                       # WebGPU port
+    ├── export/                   # Python ONNX export scripts
+    │   ├── common.py             # Shared utilities (load model, validate)
+    │   ├── export_rna_fm.py      # RNA-FM export (378 MB)
+    │   ├── export_embedder.py    # Embedder export (5 MB)
+    │   ├── export_e2eformer.py   # E2Eformer export (86 MB)
+    │   ├── export_structure.py   # Structure+Heads export (11 MB)
+    │   ├── export_refinenet.py   # RefineNet export (5 MB)
+    │   └── validate_e2e.py       # End-to-end validation (10 recycles, RMSD 0.016 A)
+    ├── models/                   # ONNX files (gitignored, hosted on R2)
+    ├── src/
+    │   ├── main.ts               # UI entry point, worker coordination
+    │   ├── style.css             # Page layout and component styles
+    │   ├── molstar.ts            # Mol* 3D viewer, pLDDT coloring
+    │   ├── inference-worker.ts   # Web Worker: ORT sessions + pipeline
+    │   ├── tokenizer.ts          # MSA + RNA-FM tokenization
+    │   ├── msa-parser.ts         # Parse .afa aligned FASTA
+    │   ├── build-coords.ts       # Frames+angles -> all-atom coordinates
+    │   ├── pdb-writer.ts         # Coordinates -> PDB string
+    │   ├── constants.ts          # RNA atom defs, rigid groups, local coords
+    │   └── rigid.ts              # Quaternion->rotmat, frame composition
+    ├── index.html                # Main page
+    ├── package.json              # onnxruntime-web, molstar, vite
+    ├── vite.config.ts            # COOP/COEP headers, model serving
+    └── tsconfig.json
 ```
 
 ## Development Commands
@@ -87,12 +111,21 @@ python rhofold/inference.py \
   --output-dir ./results/rhofold/3owz_A \
   --device cpu
 
-# With profiling
-python rhofold/inference.py \
-  --fasta ./data/rhofold/3owz_A/3owz_A.fasta \
-  --msa ./data/rhofold/3owz_A/3owz_A.afa \
-  --output-dir ./results/rhofold/3owz_A \
-  --device cpu --profile
+# ONNX export (run from repo root with conda env active)
+python webgpu/export/export_rna_fm.py
+python webgpu/export/export_embedder.py
+python webgpu/export/export_e2eformer.py
+python webgpu/export/export_structure.py
+python webgpu/export/export_refinenet.py
+
+# End-to-end ONNX validation (10 recycles)
+python webgpu/export/validate_e2e.py \
+  --fasta data/rhofold/3owz_A/3owz_A.fasta \
+  --msa data/rhofold/3owz_A/3owz_A.afa
+
+# Web UI development
+cd webgpu && npm install && npm run dev
+# Opens at http://localhost:5173/
 ```
 
 ## Tech Stack
@@ -101,60 +134,92 @@ python rhofold/inference.py \
 
 ONNX Runtime Web is the most mature WebGPU ML runtime for browsers. It handles GPU dispatch, memory management, shader compilation, and supports the full ONNX opset we need (Einsum, etc.).
 
-### Export Strategy: 4 Modular ONNX Files
+### Export Strategy: 5 Modular ONNX Files
 
-| Module | Params | Input → Output |
-|--------|--------|---------------|
-| **RNA-FM** | ~100M | `tokens [1,L]` → `repr [1,L,640]` (run once) |
-| **Embedder** | ~1.3M | `msa_tokens + rna_fm_repr + recycling_state` → `msa_fea + pair_fea` |
-| **E2Eformer** | ~25M | `msa_fea + pair_fea` → `msa_fea' + pair_fea' + single_fea` |
-| **StructureModule+Heads** | ~1M | `single_fea + pair_fea + seq` → `coords + plddt + ss + dist` |
+| Module | Size | Input -> Output |
+|--------|------|-----------------|
+| **RNA-FM** | 378 MB | `tokens [1,L]` -> `repr [1,L,640]` (run once) |
+| **Embedder** | 5 MB | `msa_tokens + rna_fm_repr + recycling_state` -> `msa_fea + pair_fea` |
+| **E2Eformer** | 86 MB | `msa_fea + pair_fea + msa_mask` -> `msa_fea' + pair_fea' + single_fea` |
+| **Structure+Heads** | 11 MB | `single_fea + pair_fea` -> `frames + angles + plddt + ss_logits` |
+| **RefineNet** | 5 MB | `first_msa_row + coords` -> `refined_coords` |
 
-Recycling loop (10 iterations of Embedder→E2Eformer→StructureModule) orchestrated in TypeScript.
+Recycling loop (1-10 iterations of Embedder -> E2Eformer -> Structure -> build_cords -> RefineNet) orchestrated in TypeScript.
+
+### Model Hosting
+
+ONNX models are hosted on Cloudflare R2 at `https://r2.brighthong.com/v0/`.
+- R2 bucket: `rhofold` (account `8c3ded8031b5fc24914f3205bdf61093`)
+- CORS enabled for all origins
+- Browser caches models via Cache API (`rhofold-models-v0`)
+- All 5 models downloaded in parallel on first use (~486 MB total)
+
+### Browser Pipeline
+
+```
+Main Thread                          Web Worker
+┌──────────────────────┐       ┌──────────────────────────┐
+│  UI (index.html)     │       │  inference-worker.ts     │
+│  - FASTA textarea    │  msg  │  - Download from R2      │
+│  - MSA file upload   │<----->│  - Cache API caching     │
+│  - Options panel     │       │  - Load 5 ONNX sessions  │
+│  - Mol* 3D viewer    │       │  - RNA-FM (once)         │
+│  - pLDDT chart       │       │  - Recycle loop x N:     │
+│  - Progress bar      │       │    Embed->E2E->Struct    │
+│  - Download buttons  │       │    build_cords (JS)      │
+│                      │       │    RefineNet             │
+└──────────────────────┘       │  - Generate PDB string   │
+                               └──────────────────────────┘
+```
 
 ### Precision Strategy
 
-**Phase 1 (current)**: fp32 everywhere — match PyTorch reference exactly, eliminate precision as a variable. ~508MB total weight size.
+**Phase 1 (current)**: fp32 everywhere — match PyTorch reference exactly, eliminate precision as a variable. ~486 MB total weight size.
 
 **Phase 2 (optimization)**: fp16 storage + mixed f16/f32 compute. Pin IPA distance, OPM einsum, and quaternion ops to f32. Target ~254MB. Validate against bf16-mixed CUDA baseline.
 
-**Phase 3 (stretch)**: int8 for frozen RNA-FM → ~154MB total.
+**Phase 3 (stretch)**: int8 for frozen RNA-FM -> ~154MB total.
 
 ### Target Sequence Length
 
-L ≤ 200 (covers tRNAs, riboswitches, aptamers, most structured RNAs). Memory at L=200 fp32: pair_fea ~20MB, OPM peak ~160MB — comfortable for any modern GPU.
+L <= 200 (covers tRNAs, riboswitches, aptamers, most structured RNAs). Memory at L=200 fp32: pair_fea ~20MB, OPM peak ~160MB — comfortable for any modern GPU.
 
 ### Scope
 
 - **In scope**: Full forward-pass inference, weight loading, coordinate generation, PDB export
 - **Out of scope**: Amber relaxation (OpenMM), MSA search (BLAST/Infernal databases), training
 
-### Key Non-Standard Ops to Handle for ONNX Export
+### Key Non-Standard Ops Handled in ONNX Export
 
-1. **Rigid class** → decompose to explicit rotation matrices `[*,3,3]` + translations `[*,3]`
-2. **IPA 3D pairwise distance** → Einsum + Sub + Mul + ReduceSum
-3. **Outer product mean** `einsum('...bac,...dae->...bdce')` → decompose to batched MatMul
-4. **Quaternion ↔ rotation** → precomputed coefficient tensors + reshape-based contraction
-5. **Triangle multiplicative updates** → channel-as-batch MatMul with sigmoid gating
-6. **Multi-bias attention** → pre-sum biases before SDPA
-7. **EGNN coordinate update** → weighted coordinate aggregation einsum
-8. **Frame chaining loop** → unroll sequential rigid body composition
+1. **Rigid class** -> decompose to explicit rotation matrices `[*,3,3]` + translations `[*,3]`
+2. **IPA 3D pairwise distance** -> Einsum + Sub + Mul + ReduceSum
+3. **Outer product mean** `einsum('...bac,...dae->...bdce')` -> decompose to batched MatMul
+4. **Quaternion <-> rotation** -> precomputed coefficient tensors + reshape-based contraction
+5. **Triangle multiplicative updates** -> channel-as-batch MatMul with sigmoid gating
+6. **Multi-bias attention** -> pre-sum biases before SDPA
+7. **EGNN coordinate update** -> weighted coordinate aggregation einsum
+8. **CoorsNorm** -> LayerNorm(1) replaced with learned bias multiply (ORT rejects dim=1 LayerNorm)
+9. **Frame chaining loop** -> unroll sequential rigid body composition
+10. **build_cords** -> NOT in ONNX; ported to TypeScript (`build-coords.ts` + `rigid.ts`)
 
 ### Milestones
 
-1. Export RNA-FM to ONNX (fp32), validate numerical equivalence in Python
-2. Run RNA-FM in browser via ORT-Web WebGPU EP
-3. Export Embedder + E2Eformer — rewrite Rigid abstractions, decompose custom ops
-4. Export StructureModule + Heads — rewrite IPA and EGNN for ONNX
-5. End-to-end browser inference on 3owz_A (L=68)
-6. Optimization: fp16 weights, memory profiling, streaming weights
-7. Web UI: FASTA input + Mol* 3D viewer + progress indicators
+1. ~~Export RNA-FM to ONNX (fp32), validate numerical equivalence in Python~~
+2. ~~Export Embedder + E2Eformer — rewrite Rigid abstractions, decompose custom ops~~
+3. ~~Export StructureModule + Heads — rewrite IPA and EGNN for ONNX~~
+4. ~~Export RefineNet — CoorsNorm workaround~~
+5. ~~End-to-end validation: 10 recycles, RMSD 0.016 A vs PyTorch~~
+6. ~~Web UI: FASTA input, Mol* 3D viewer, progress indicators, model caching~~
+7. Browser testing and debugging
+8. Optimization: fp16 weights, memory profiling
 
 ### Frontend
 
-- **3D viewer**: Mol* (Molstar)
-- **UI**: Lightweight TypeScript
+- **3D viewer**: Mol* (Molstar) with uncertainty color theme (pLDDT)
+- **UI**: TypeScript + Vite, two-panel layout
 - **Threading**: ONNX Runtime Web runs in a Web Worker
+- **Options**: Recycles (1-10), MSA depth (4/16/64/128), Backend (WebGPU/WASM)
+- **Caching**: Models cached via Cache API with download/clear UI
 
 ## Conventions
 
@@ -162,4 +227,5 @@ L ≤ 200 (covers tRNAs, riboswitches, aptamers, most structured RNAs). Memory a
 - All WebGPU code goes under `webgpu/`
 - Phase 1 uses fp32 — validate numerical equivalence (max |diff| < 1e-4 per module)
 - Document any operator that required special decomposition for ONNX export
-- Weights stored in ONNX external data format under `webgpu/models/` (gitignored)
+- ONNX weights hosted on R2 (gitignored locally under `webgpu/models/`)
+- Two tokenization schemes: MSA alphabet (A=4,U=5,G=6,C=7) and RNA-FM ESM-1b alphabet (A=4,C=5,G=6,U=7) — different orderings
