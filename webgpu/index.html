@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>RhoFold+ WebGPU</title>
+  <link rel="stylesheet" href="/src/style.css" />
+</head>
+<body>
+  <!-- Header -->
+  <header class="header">
+    <div class="header-left">
+      <h1>RhoFold<span class="plus">+</span> <span class="tag">WebGPU</span></h1>
+      <p class="subtitle">RNA 3D Structure Prediction — Client-Side Inference</p>
+    </div>
+    <div class="header-right">
+      <a href="https://github.com/ml4bio/RhoFold" target="_blank" rel="noopener">GitHub</a>
+      <a href="https://doi.org/10.1038/s41592-024-02487-0" target="_blank" rel="noopener">Paper</a>
+    </div>
+  </header>
+
+  <!-- Main content -->
+  <main class="main">
+    <!-- Left: Input panel -->
+    <section class="panel input-panel">
+      <h2>Input</h2>
+
+      <!-- FASTA -->
+      <label for="fasta-input">Sequence (FASTA format)</label>
+      <textarea id="fasta-input" rows="6" spellcheck="false" placeholder=">sequence_name&#10;GGCUCUGGAG..."></textarea>
+
+      <!-- MSA -->
+      <label for="msa-input">MSA File (optional, .afa aligned FASTA)</label>
+      <div class="file-row">
+        <input type="file" id="msa-input" accept=".afa,.a2m,.fasta,.fa,.txt" />
+        <span id="msa-filename" class="file-label">No file selected</span>
+      </div>
+
+      <!-- Models status (compact) -->
+      <div id="models-status" class="models-row">
+        <span class="models-label">Models</span>
+        <span id="models-badge" class="models-badge"></span>
+        <button id="btn-download-models" class="btn-dl" style="display:none">Download</button>
+        <button id="btn-clear-cache" class="btn-dl btn-dl-clear" style="display:none">Clear</button>
+      </div>
+
+      <!-- Options -->
+      <div class="options-section">
+        <h3>Options</h3>
+
+        <div class="option-row">
+          <label for="recycles-slider">Recycles: <strong id="recycles-value">10</strong></label>
+          <input type="range" id="recycles-slider" min="1" max="10" value="10" />
+        </div>
+
+        <div class="option-row">
+          <label for="msa-depth">MSA Depth</label>
+          <select id="msa-depth">
+            <option value="4">4</option>
+            <option value="16">16</option>
+            <option value="64">64</option>
+            <option value="128" selected>128</option>
+          </select>
+        </div>
+
+        <div class="option-row">
+          <label for="backend-select">Backend</label>
+          <select id="backend-select">
+            <option value="webgpu">WebGPU</option>
+            <option value="wasm">WASM</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- Actions -->
+      <div class="actions">
+        <button id="btn-example" class="btn btn-secondary">Load Example</button>
+        <button id="btn-predict" class="btn btn-primary" disabled>Predict</button>
+      </div>
+
+      <!-- Status -->
+      <div id="status-bar" class="status-bar">
+        <span id="status-text">Click "Predict" to load models and run inference.</span>
+      </div>
+    </section>
+
+    <!-- Right: Results panel -->
+    <section class="panel results-panel">
+      <h2>Results</h2>
+
+      <!-- 3D Viewer -->
+      <div id="molstar-container" class="viewer-container">
+        <div id="molstar-viewer" class="viewer-inner"></div>
+        <div id="viewer-placeholder" class="viewer-placeholder">
+          3D structure will appear here after prediction
+        </div>
+      </div>
+
+      <!-- Progress -->
+      <div id="progress-section" class="progress-section" hidden>
+        <div class="progress-bar-outer">
+          <div id="progress-bar" class="progress-bar-inner" style="width: 0%"></div>
+        </div>
+        <span id="progress-text" class="progress-text"></span>
+      </div>
+
+      <!-- pLDDT chart -->
+      <div id="plddt-section" class="plddt-section" hidden>
+        <div class="plddt-header">
+          <h3>Confidence (pLDDT)</h3>
+          <div class="plddt-legend">
+            <span class="legend-item"><span class="legend-swatch" style="background:#0053d6"></span>&gt;0.9</span>
+            <span class="legend-item"><span class="legend-swatch" style="background:#65cbf3"></span>0.7-0.9</span>
+            <span class="legend-item"><span class="legend-swatch" style="background:#ffdb13"></span>0.5-0.7</span>
+            <span class="legend-item"><span class="legend-swatch" style="background:#ff7d45"></span>&lt;0.5</span>
+          </div>
+        </div>
+        <canvas id="plddt-chart" height="100"></canvas>
+        <p id="plddt-global" class="plddt-global"></p>
+      </div>
+
+      <!-- Downloads -->
+      <div id="download-section" class="download-section" hidden>
+        <h3>Downloads</h3>
+        <div class="download-buttons">
+          <button id="btn-download-pdb" class="btn btn-secondary">Download PDB</button>
+          <button id="btn-download-plddt" class="btn btn-secondary">Download pLDDT CSV</button>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- Footer -->
+  <footer class="footer">
+    Powered by <a href="https://onnxruntime.ai" target="_blank" rel="noopener">ONNX Runtime Web</a>
+    &middot; RhoFold+ (Shen et al., <em>Nature Methods</em> 2024)
+  </footer>
+
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>
