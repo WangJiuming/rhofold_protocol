@@ -1,0 +1,18 @@
+{
+  "name": "example_batch",
+  "sequences": [
+    {
+      "rna": {
+        "id": "3owz_A",
+        "sequence": "GGCUCUGGAGAGAACCGUUUAAUCGGUCGCCGAAGGAGCAAGCUCUGCGGAAACGCAGAGUGAAACUCUCAGGCAAAAGGACAGAGUC",
+        "msaPath": "data/rhofold/3owz_A/3owz_A.afa"
+      }
+    },
+    {
+      "rna": {
+        "id": "4qlm_A",
+        "sequence": "GGATCGCTGAACCCGAAAGGGGCGGGGGACCCAGAAATGGGGCGAATCTCTTCCGAAAGGAAGAGTAGGGTTACTCCTTCGACCCGAGCCCGTCAGCTAACCTCGCAAGCGTCCGAAGGAGAATC"
+      }
+    }
+  ]
+}
