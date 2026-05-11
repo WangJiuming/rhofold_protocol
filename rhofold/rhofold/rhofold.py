@@ -54,9 +54,14 @@ class RhoFold(nn.Module):
         )
 
 
-    def forward_cords(self, tokens, single_fea, pair_fea, seq):
+    def forward_cords(self, tokens, single_fea, pair_fea, seq, res_mask=None):
 
-        output = self.structure_module.forward(seq, tokens, { "single": single_fea, "pair": pair_fea } )
+        output = self.structure_module.forward(
+            seq,
+            tokens,
+            {"single": single_fea, "pair": pair_fea},
+            mask=res_mask,
+        )
         output['plddt'] = self.plddt_head(output['single'][-1])
 
         return output
@@ -69,20 +74,43 @@ class RhoFold(nn.Module):
 
         return output
 
-    def forward_one_cycle(self, tokens, rna_fm_tokens, recycling_inputs, seq):
+    def forward_one_cycle(self, tokens, rna_fm_tokens, recycling_inputs, seq,
+                          msa_mask=None, pair_mask=None, res_mask=None):
         '''
         Args:
-            tokens: [bs, seq_len, c_z]
-            rna_fm_tokens: [bs, seq_len, c_z]
+            tokens: [B, K, L] MSA token ids (may include padding via padding_idx).
+            rna_fm_tokens: [B, L] RNA-FM token ids (may include padding via padding_idx).
+            seq: str or List[str] of length B. Each entry is the unpadded RNA sequence
+                 (only A/U/G/C residues, no padding) for the corresponding batch element.
+            msa_mask: [B, K, L] bool/float mask, 1 for real positions, 0 for padding.
+                      If None, defaults to all ones (back-compat with single-seq inference).
+            pair_mask: [B, L, L] mask on pair positions. Defaults to outer product of res_mask.
+            res_mask: [B, L] mask on residue positions. Defaults to all ones.
         '''
 
         device = tokens.device
 
         msa_tokens_pert = tokens[:, :self.config.globals.msa_depth]
+        if msa_mask is not None:
+            msa_mask = msa_mask[:, :self.config.globals.msa_depth]
 
         msa_fea, pair_fea = self.msa_embedder.forward(tokens=msa_tokens_pert,
                                                       rna_fm_tokens=rna_fm_tokens,
                                                       is_BKL=True)
+
+        # Build masks for E2EformerStack. Default to ones for back-compat with
+        # the single-sequence inference path.
+        if res_mask is None:
+            res_mask = torch.ones(msa_fea.shape[0], msa_fea.shape[2],
+                                  device=device, dtype=msa_fea.dtype)
+        if msa_mask is None:
+            msa_mask = torch.ones(msa_fea.shape[:3], device=device, dtype=msa_fea.dtype)
+        else:
+            msa_mask = msa_mask.to(device=device, dtype=msa_fea.dtype)
+        if pair_mask is None:
+            pair_mask = res_mask[:, :, None] * res_mask[:, None, :]
+        pair_mask = pair_mask.to(device=device, dtype=msa_fea.dtype)
+        res_mask = res_mask.to(device=device, dtype=msa_fea.dtype)
 
         if exists(self.recycle_embnet) and exists(recycling_inputs):
             msa_fea_up, pair_fea_up = self.recycle_embnet(recycling_inputs['single_fea'],
@@ -94,12 +122,12 @@ class RhoFold(nn.Module):
         msa_fea, pair_fea, single_fea = self.e2eformer(
             m=msa_fea,
             z=pair_fea,
-            msa_mask=torch.ones(msa_fea.shape[:3]).to(device),
-            pair_mask=torch.ones(pair_fea.shape[:3]).to(device),
+            msa_mask=msa_mask,
+            pair_mask=pair_mask,
             chunk_size=None,
         )
 
-        output = self.forward_cords(tokens, single_fea, pair_fea, seq)
+        output = self.forward_cords(tokens, single_fea, pair_fea, seq, res_mask=res_mask)
 
         output.update(self.forward_heads(pair_fea))
 
@@ -115,9 +143,19 @@ class RhoFold(nn.Module):
                 tokens,
                 rna_fm_tokens,
                 seq,
+                msa_mask=None,
+                pair_mask=None,
+                res_mask=None,
                 **kwargs):
 
         """Perform the forward pass.
+
+        Single-sequence usage (back-compat): pass tokens [1, K, L], rna_fm_tokens [1, L],
+        seq as a string. Masks are all-ones by default.
+
+        Batched usage: pass tokens [B, max_K, max_L] padded with padding_idx,
+        rna_fm_tokens [B, max_L] padded with padding_idx, seq as a List[str] of
+        length B (each entry the unpadded sequence), and explicit masks.
 
         Args:
 
@@ -129,7 +167,9 @@ class RhoFold(nn.Module):
         outputs = []
         for _r in range(self.config.model.recycling_embedder.recycles):
             output, recycling_inputs = \
-                self.forward_one_cycle(tokens, rna_fm_tokens, recycling_inputs, seq)
+                self.forward_one_cycle(tokens, rna_fm_tokens, recycling_inputs, seq,
+                                       msa_mask=msa_mask, pair_mask=pair_mask,
+                                       res_mask=res_mask)
             outputs.append(output)
 
         return outputs

@@ -27,6 +27,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 from rhofold.utils.alphabet import RNAAlphabet
+from rhofold.utils.constants import RNA_CONSTANTS
 from rhofold.utils.converter import RNAConverter
 
 class RefineNet(nn.Module):
@@ -849,12 +850,60 @@ class StructureModule(nn.Module):
 
         outputs = dict_multimap(torch.stack, outputs)
 
-        cords, mask = self.converter.build_cords(seq, outputs['frames'][-1], outputs['angles'][-1], rtn_cmsk=True)
-        cord_list = [[cords, mask]]
-        if self.refinenet is not None:
-            outputs['cord_tns_pred'] = [ self.refinenet(msa_tokens, cord[0].reshape([s.shape[0], -1, 3])) for cord in cord_list]
-        else:
-            outputs['cord_tns_pred'] = [ cord[0].reshape([s.shape[0], -1, 3]) for cord in cord_list]
-        outputs["cords_c1'"] = [cord[0][:, 1, :].unsqueeze(0) for cord in cord_list]
+        # The IPA block above is fully batched (B >= 1), but the downstream
+        # coord builder (RNAConverter.build_cords) and the EGNN refinenet are
+        # not batch-correct: build_cords reads `len(seq)` as N_res and indexes
+        # frames as [L, 1, 4, 3]; the refinenet's EGNN messages all pairs of
+        # padded+real positions. We loop per-sample for those, then repack
+        # into batched, zero-padded tensors so the calling code (recycling,
+        # per-sample export) sees consistent shapes.
+        seq_list = [seq] if isinstance(seq, str) else list(seq)
+        B, L_max = s.shape[0], s.shape[1]
+        assert len(seq_list) == B, (
+            f"seq length {len(seq_list)} does not match batch size {B}"
+        )
+
+        n_atoms = RNA_CONSTANTS.ATOM_NUM_MAX
+        device = s.device
+        dtype = s.dtype
+
+        cord_pred_padded = torch.zeros(
+            B, L_max * n_atoms, 3, device=device, dtype=dtype,
+        )
+        cords_c1_padded = torch.zeros(
+            B, L_max, 3, device=device, dtype=dtype,
+        )
+
+        frames_last = outputs['frames'][-1]
+        angles_last = outputs['angles'][-1]
+
+        for b in range(B):
+            L_b = len(seq_list[b])
+            if L_b == 0:
+                continue
+            assert L_b <= L_max, (
+                f"seq {b} has length {L_b} but tensors are padded to {L_max}"
+            )
+            fram_b = frames_last[b:b + 1, :L_b]              # [1, L_b, 7]
+            angl_b = angles_last[b:b + 1, :L_b]              # [1, L_b, A, 2]
+            msa_tokens_b = msa_tokens[b:b + 1, :, :L_b]      # [1, K, L_b]
+
+            cord_b, _ = self.converter.build_cords(
+                seq_list[b], fram_b, angl_b, rtn_cmsk=True,
+            )  # cord_b: [L_b, n_atoms, 3]
+
+            if self.refinenet is not None:
+                cord_b_pred = self.refinenet(
+                    msa_tokens_b,
+                    cord_b.reshape([1, -1, 3]),
+                )  # [1, L_b * n_atoms, 3]
+            else:
+                cord_b_pred = cord_b.reshape([1, -1, 3])
+
+            cord_pred_padded[b, :L_b * n_atoms] = cord_b_pred.squeeze(0)
+            cords_c1_padded[b, :L_b] = cord_b[:, 1, :]
+
+        outputs['cord_tns_pred'] = [cord_pred_padded]
+        outputs["cords_c1'"] = [cords_c1_padded]
 
         return outputs

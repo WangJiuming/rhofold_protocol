@@ -11,6 +11,7 @@
 ## Table of contents
 * [About this repository](#about-this-repository)
 * [Quick start](#quick-start)
+* [Batched inference](#batched-inference)
 * [Content of this repository](#content-of-this-repository)
   * [Codebase organization](#codebase-organization)
   * [Example data information](#working-example-data-information)
@@ -41,9 +42,10 @@ The details of each step is described in the protocol. Here, we briefly outline 
 **Note**: The instructions below are based on a Linux operating system with CUDA 12.4.
 
 ```
-git clone https://github.com/WangJiuming/rhofold_protocol.git
+git clone -b dev/batch_inference https://github.com/WangJiuming/rhofold_protocol.git
 cd rhofold_protocol
 ```
+The `-b dev/batch_inference` flag checks out the branch that includes the batched inference script described below; everything else in the protocol works the same on this branch.
 Then create the cond environment from the `.yml` configuration file.
 ```
 conda env create -f environment.yml
@@ -98,6 +100,107 @@ GDT-HA-score= 0.4680 %(d<0.5)=0.0930 %(d<1)=0.2326 %(d<2)=0.6279 %(d<4)=0.9186
 ...
 ```
 
+<!-- Batched inference -->
+## Batched inference
+
+> Available on the `dev/batch_inference` branch. The simplest way to get it is the one-step clone shown in [Quick start](#quick-start):
+> ```
+> git clone -b dev/batch_inference https://github.com/WangJiuming/rhofold_protocol.git
+> ```
+
+`rhofold/inference.py` predicts one RNA at a time, and the existing `rhofold/batch_inference.py` simply loops over many sequences inside a single Python process — each sequence still passes through the network on its own. For many short to medium-length sequences this is dominated by per-call overhead (model load, host&harr;device transfers, kernel launches) rather than by the actual math.
+
+`rhofold/batched_inference.py` performs **true tensor batching**: multiple sequences are padded to a common length, stacked into a single forward pass through the MSA embedder, the E2Eformer, the IPA, and the distogram / secondary-structure / pLDDT heads, with explicit attention masks isolating each sample. Amber relaxation remains per-sample (OpenMM is not batchable) and runs sequentially after the batched forward.
+
+### When to use which
+
+| Use case | Script |
+|---|---|
+| Single sequence, with or without an MSA — matches the protocol's Stage 3 | `rhofold/inference.py` |
+| Many sequences, one process, sequential forward passes | `rhofold/batch_inference.py` |
+| Many sequences in a single padded forward pass (faster on GPU) | `rhofold/batched_inference.py` |
+
+The batched script is intended for high-throughput scenarios such as scanning a library of designed RNAs, ranking candidates, or running ablations across many short sequences without paying repeated startup cost.
+
+### Input format
+
+The input is a single JSON file with a `sequences` array, mirroring the AlphaFold3 server input style. Each entry is one independent RNA prediction:
+
+```json
+{
+  "name": "example_batch",
+  "sequences": [
+    {
+      "rna": {
+        "id": "3owz_A",
+        "sequence": "GGCUCUGGAGAGAACCGUUUAAUCGGUCGCCGAAGGAGCAAGCUCUGCGGAAACGCAGAGUGAAACUCUCAGGCAAAAGGACAGAGUC",
+        "msaPath": "data/rhofold/3owz_A/3owz_A.afa"
+      }
+    },
+    {
+      "rna": {
+        "id": "4qlm_A",
+        "sequence": "GGAUCGCUGAACCCGAAAGGGGCGGGGGACCCAGAAAUGGGGCGAAUCUCUUCCGAAAGGAAGAGUAGGGUUACUCCUUCGACCCGAGCCCGUCAGCUAACCUCGCAAGCGUCCGAAGGAGAAUC"
+      }
+    }
+  ]
+}
+```
+
+Per-sample fields under `rna`:
+- **`id`** (required) — output subdirectory name.
+- **`sequence`** (required) — RNA sequence (A/U/G/C; `T` is auto-converted to `U`).
+- **`msaPath`** (optional) — path to a precomputed MSA file (`.afa` / `.a3m` / `.fasta`).
+- **`msa`** (optional) — inline MSA as a FASTA-formatted string.
+
+If neither `msaPath` nor `msa` is given, that entry runs in single-sequence mode. Empty MSA files / empty inline MSAs trigger a warning and fall back to single-sequence mode for that entry. MSA-mode and single-sequence-mode samples can be freely mixed in the same batch — depths are padded internally with the appropriate mask.
+
+A ready-to-run example is provided at `data/example_batch.json`.
+
+### CLI
+
+```bash
+python rhofold/batched_inference.py \
+  --input data/example_batch.json \
+  --output-dir results/batched/example \
+  --ckpt ./checkpoints/rhofold_pretrained_params.pt \
+  --device cuda:0 \
+  --batch-size 2 \
+  --relax-steps 1000
+```
+
+| Flag | Default | Notes |
+|---|---|---|
+| `--input` | required | Path to the input JSON. |
+| `--output-dir` | required | One subdirectory per sample id is created under here. |
+| `--ckpt` | `./checkpoints/rhofold_pretrained_params.pt` | Same checkpoint as `inference.py`. |
+| `--device` | `cpu` | Set `cuda:0` for GPU. |
+| `--batch-size` | `2` | Sequences per forward pass. Conservative default for modern 24–32 GiB GPUs; raise it for short / single-seq workloads. |
+| `--relax-steps` | `1000` | Amber iterations per sample (sequential, runs after the batched forward). Set `0` to skip relaxation entirely. |
+| `--deterministic` | off | Pin cuDNN / cuBLAS algorithms. Costs some speed but improves cross-batch-size reproducibility (see caveat below). |
+
+### Output
+
+Per sample the script writes the same files as the single-sequence pipeline:
+
+```
+results/batched/example/
+  log.txt                              # batch-level log
+  3owz_A/
+    unrelaxed_model.pdb
+    relaxed_<N>_model.pdb              # only if --relax-steps > 0
+    results.npz                        # distograms, pLDDT, secondary-structure prob map
+    ss.ct                              # predicted secondary structure
+  4qlm_A/
+    ...
+```
+
+The analysis scripts under `scripts/` (e.g. `8_parse_plddt.py`, `11_eval_3d_acc.py`) can be applied to each per-sample `results.npz` / `*.pdb` directly.
+
+### Notes on numerics
+
+The per-sample math is mathematically equivalent to running each sequence alone (the masking has been verified). In practice, mixing different sequence lengths in one batch can produce float32-level drift across batch sizes — typically below 1e-5 in pLDDT but up to ~1e-3 in worst-case mixes — because cuBLAS / cuDNN pick different algorithms for different batch shapes. Mean pLDDT differs by well under 1% even in the worst case, and the resulting structures are essentially equivalent. Pass `--deterministic` if you need tighter reproducibility across batch sizes; an upcoming length-bucketing variant will eliminate this drift entirely by keeping batch shapes constant.
+
 <!-- File organization -->
 ## Content of this repository
 ### Codebase organization
@@ -118,7 +221,7 @@ This codebase contains the following directories:
 
 <li><code>results/</code>: for keeping the output from this protocol.</li>
 
-<li><code>rhofold/</code>: main module of the RhoFold+ model, which is adapted from the original RhoFold+ model to streamline the workflow of this protocol. This is where the main structure prediction code <code>inference.py</code> is located.</li>
+<li><code>rhofold/</code>: main module of the RhoFold+ model, which is adapted from the original RhoFold+ model to streamline the workflow of this protocol. This is where the main structure prediction code <code>inference.py</code> (single sequence) and <code>batched_inference.py</code> (true tensor batching across many sequences, see the <a href="#batched-inference">Batched inference</a> section) are located.</li>
 
 <li><code>rmsa/</code>: for keeping the rMSA tool [6] for MSA search, which is cloned from the official rMSA2 release.</li>
 
