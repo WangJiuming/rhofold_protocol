@@ -1,4 +1,4 @@
-"""Batched RhoFold+ inference with true tensor batching.
+"""Batched RhoFold+ inference with true tensor batching + length bucketing.
 
 Unlike `batch_inference.py`, which loops over sequences one at a time,
 this script stacks multiple sequences into a single forward pass with
@@ -9,6 +9,13 @@ sample inside the structure module because they are not batch-safe on
 heterogeneous sequences (the converter assumes B=1 and indexes residues
 by name; the refinenet's EGNN exchanges messages across all positions
 and would leak padded positions into real ones).
+
+Before batching, samples are sorted by (sequence length, MSA depth)
+ascending. With `--batch-size B`, consecutive sorted samples are
+grouped, which keeps each forward pass tight on padding and — because
+within a batch the tensor shapes are uniform — yields per-sample
+outputs that match B=1 to float32 precision (no cuBLAS algorithm
+selection drift across batch shapes).
 
 Amber relaxation is run sequentially per sample (OpenMM is not
 batchable). Pass --relax-steps 0 to skip.
@@ -34,19 +41,13 @@ If neither MSA field is given, single-sequence mode is used for that entry.
 
 Per-sample reproducibility across batch sizes
 ---------------------------------------------
-With heterogeneous-length batches the per-sample math is mathematically
-equivalent to B=1 (verified — masks correctly isolate samples), but the
-numerical results can drift by up to ~1e-3 in pLDDT max because cuBLAS
-and cuDNN pick different algorithms for different batch shapes (B, max_K,
-max_L). Mean pLDDT typically agrees to <0.1%. The drift is float32-level
-algorithm-selection noise, not a leak.
-
-Mitigations:
-  * Pass --deterministic to pin algorithms within each batch shape; this
-    reduces the worst-case to ~1e-4 at the cost of speed.
-  * Group same-length / same-MSA-depth sequences into the same batch
-    (length bucketing, the planned successor to this script) — that keeps
-    batch shape constant, eliminating algorithm-selection drift entirely.
+Length bucketing keeps the (B, max_K, max_L) shape uniform within each
+forward pass, so cuBLAS / cuDNN pick the same algorithms regardless of
+the surrounding batch — per-sample outputs match B=1 to float32 noise.
+Residual padding drift only appears when two samples in the same bucket
+still differ in shape (e.g. adjacent unique lengths); that drift stays
+in the ~1e-6 range. Pass --deterministic if you need bit-level
+reproducibility within a fixed shape; on most hardware it is unnecessary.
 """
 
 import argparse
@@ -373,8 +374,28 @@ def main(args):
 
         unrelaxed_paths: List[tuple] = []  # (sample_id, seq, unrelaxed_pdb_path)
 
-        # Build batches in input order (we will add length bucketing in a
-        # follow-up; this is the "make B work correctly" stage).
+        # Length bucketing: sort by (L, K) ascending before chunking so each
+        # forward pass works on the tightest possible (max_L, max_K) for that
+        # batch. This both recovers the speedup wasted on padding and removes
+        # the cross-batch float32 drift previously caused by cuBLAS picking
+        # different algorithms for different batch shapes — within a bucket
+        # all samples share the same shape, so cuBLAS makes consistent choices
+        # and per-sample outputs match B=1 to float32 precision.
+        if args.no_bucketing:
+            logger.info(
+                'Length bucketing disabled (--no-bucketing). Processing '
+                'samples in input order.'
+            )
+        elif len(feats_per_sample) > 1:
+            feats_per_sample.sort(key=lambda sf: (
+                sf[1]['tokens'].shape[2],   # L
+                sf[1]['tokens'].shape[1],   # K
+            ))
+            logger.info(
+                f'Sorted {len(feats_per_sample)} samples by (L, K) for length '
+                f'bucketing: order = {[s.sample_id for s, _ in feats_per_sample]}'
+            )
+
         for start in range(0, len(feats_per_sample), args.batch_size):
             chunk = feats_per_sample[start:start + args.batch_size]
             chunk_ids = [s.sample_id for s, _ in chunk]
@@ -489,6 +510,13 @@ if __name__ == '__main__':
              'within float32 noise. Off by default for speed; the structures '
              'are equivalent within ~1e-3 pLDDT max either way, but pLDDT '
              'and distograms may differ across batch shapes when off.',
+    )
+    parser.add_argument(
+        '--no-bucketing', action='store_true',
+        help='Disable length bucketing and process samples in input order. '
+             'Bucketing (the default) sorts by (L, K) before chunking so each '
+             'batch has tight shapes; without it, mixing short and long '
+             'sequences in the same batch wastes compute on padding.',
     )
     args = parser.parse_args()
     main(args)

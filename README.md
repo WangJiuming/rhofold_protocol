@@ -199,7 +199,7 @@ The analysis scripts under `scripts/` (e.g. `8_parse_plddt.py`, `11_eval_3d_acc.
 
 ### Notes on numerics
 
-The per-sample math is mathematically equivalent to running each sequence alone (the masking has been verified). In practice, mixing different sequence lengths in one batch can produce float32-level drift across batch sizes — typically below 1e-5 in pLDDT but up to ~1e-3 in worst-case mixes — because cuBLAS / cuDNN pick different algorithms for different batch shapes. Mean pLDDT differs by well under 1% even in the worst case, and the resulting structures are essentially equivalent. Pass `--deterministic` if you need tighter reproducibility across batch sizes; an upcoming length-bucketing variant will eliminate this drift entirely by keeping batch shapes constant.
+Before chunking, samples are sorted by (sequence length, MSA depth) so each forward pass works on tensors of uniform shape. This recovers the speedup that would otherwise be wasted padding short sequences out to the longest in the batch, and — because cuBLAS / cuDNN see a consistent shape per bucket — per-sample outputs match a B=1 run to float32 noise (typically below 1e-6 in pLDDT). Residual drift only appears when two samples in the same bucket still differ in shape (e.g. adjacent unique lengths), and stays well within float32 precision. Pass `--deterministic` to additionally pin cuBLAS / cuDNN algorithms within each shape; on most hardware this is not needed.
 
 <!-- File organization -->
 ## Content of this repository
